@@ -397,7 +397,7 @@ async fn session_loop(
                                 }
                             }
                             Some(jmds_tui::app::CommandOutcome::Key) => {
-                                let said = key_report(&config);
+                                let said = key_report(config);
                                 app.host_mut().note(&said);
                             }
                             Some(jmds_tui::app::CommandOutcome::Keep { table, key, value }) => {
