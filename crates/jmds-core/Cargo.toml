@@ -1,0 +1,17 @@
+[package]
+name = "jmds-core"
+version = "0.1.0"
+edition = "2024"
+description = "Just My DeepSeek: the engine — sessions, panes, configuration, the event bus"
+license = "MIT"
+
+[dependencies]
+color-eyre = { workspace = true }
+dirs = { workspace = true }
+log = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+toml_edit = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true }
