@@ -9,6 +9,7 @@ license = "MIT"
 base64 = "0.23.1"
 crossterm = { workspace = true }
 jmds-core = { path = "../jmds-core" }
+log = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true }
 unicode-width = { workspace = true }

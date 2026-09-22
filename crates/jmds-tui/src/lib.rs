@@ -6,7 +6,9 @@
 //! capability probes (colour depth, kitty keyboard protocol, synchronized output, bracketed
 //! paste, tmux), the OSC 11 background probe and the colour maths the two are built on.
 //!
-//! Rendering and input will live here too, beside [`terminal`], and reach the engine through
-//! `jmds-core`'s event bus.
+//! Rendering and input live here too: [`pane`] is the `Pane` trait and the host that lays panes
+//! out, draws their borders and routes keys to whichever one has focus. Both reach the engine
+//! through `jmds-core`'s event bus.
 
+pub mod pane;
 pub mod terminal;

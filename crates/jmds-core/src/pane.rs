@@ -128,6 +128,15 @@ impl Rect {
         }
     }
 
+    /// Whether a cell is inside.
+    ///
+    /// The right and bottom edges are outside: `x + width` is the first column the rectangle does
+    /// not cover, the same half-open rule the split arithmetic follows. Written with `wrapping_sub`
+    /// so a cell far to the left or above cannot overflow into a false hit.
+    pub const fn contains(self, x: u16, y: u16) -> bool {
+        x.wrapping_sub(self.x) < self.width && y.wrapping_sub(self.y) < self.height
+    }
+
     /// The area a pane covers, as `(x, y, width, height)`, for a test that needs to see it.
     pub const fn area(self) -> u32 {
         self.width as u32 * self.height as u32
@@ -790,6 +799,21 @@ mod tests {
         assert!(!tree.close(id(9)));
         assert!(!tree.set_ratio(id(9), 0.5));
         assert_eq!(tree.leaves(), vec![id(1)]);
+    }
+
+    #[test]
+    fn a_rectangle_holds_the_cells_inside_it_and_not_its_edges() {
+        let rect = Rect::new(2, 3, 4, 5);
+        assert!(rect.contains(2, 3), "the top left corner is inside");
+        assert!(rect.contains(5, 7), "the last cell is inside");
+        assert!(!rect.contains(6, 7), "the right edge is outside");
+        assert!(!rect.contains(5, 8), "the bottom edge is outside");
+        assert!(!rect.contains(1, 3) && !rect.contains(2, 2));
+        assert!(
+            !rect.contains(u16::MAX, u16::MAX),
+            "far away cannot wrap in"
+        );
+        assert!(!rect.contains(0, 0));
     }
 
     #[test]
