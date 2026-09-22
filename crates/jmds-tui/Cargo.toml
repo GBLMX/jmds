@@ -19,7 +19,6 @@ log = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true }
 unicode-width = { workspace = true }
-portable-pty = "0.9.0"
 vt100 = "0.16.2"
 
 [target.'cfg(unix)'.dependencies]

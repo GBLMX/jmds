@@ -118,6 +118,23 @@ pub trait Pane {
     /// every frame, and the whole point of a watcher is that nobody has to.
     fn on_file_event(&mut self, _event: &jmds_core::event::FileEvent) {}
 
+    /// Something a command running under a pty did, for panes that show one.
+    ///
+    /// Routed by id rather than fanned out: one of these is about exactly one pane, and a pane that
+    /// had to check whether each one was meant for it would be a pane doing the host's routing.
+    fn on_pty_event(&mut self, _event: &jmds_core::event::PtyEvent) {}
+
+    /// What this pane wants said to the engine's processes: keys for a command it is showing, and
+    /// the size it has been given.
+    ///
+    /// The pane cannot say these itself. It has no bus and no process — it is a screen — so it leaves
+    /// them in an outbox and the app, which owns both, publishes them. Same shape as
+    /// [`Pane::take_requests`], and for the same reason: what a pane does stays a function of the
+    /// keys it was given.
+    fn take_pty(&mut self) -> Vec<jmds_core::event::PtyEvent> {
+        Vec::new()
+    }
+
     /// Add a line from the app itself, for panes that have somewhere to put one.
     fn note(&mut self, _text: &str) {}
 
@@ -183,6 +200,16 @@ impl PaneHost {
     /// else arrives.
     pub fn open(&mut self, axis: Axis, pane: impl Pane + 'static) -> PaneId {
         let id = self.tree.next_id();
+        self.open_as(id, axis, pane)
+    }
+
+    /// Open a pane under an id chosen outside.
+    ///
+    /// A terminal is named before it exists: the engine starts the command in a pane and only then
+    /// has something for the layout to show, and the events about that command are routed by the id
+    /// the pane was given. Ids come from [`PaneId::fresh`], which is a different range from the
+    /// tree's own counter, so neither can hand out a name the other is using.
+    pub fn open_as(&mut self, id: PaneId, axis: Axis, pane: impl Pane + 'static) -> PaneId {
         let placed = match self.tree.focused_id() {
             Some(near) if self.tree.contains(near) => self.tree.split(near, id, axis),
             _ => {
@@ -372,6 +399,33 @@ impl PaneHost {
         for pane in self.panes.values_mut() {
             pane.on_file_event(event);
         }
+    }
+
+    /// Hand a pty event to the pane it is about.
+    ///
+    /// The events that go the other way — keys, resizes, kills — are not for a pane: they are what
+    /// the panes asked for, on their way to the engine, and the app publishes them.
+    pub fn on_pty_event(&mut self, event: &jmds_core::event::PtyEvent) {
+        use jmds_core::event::PtyEvent;
+
+        let id = match event {
+            PtyEvent::Started { id, .. }
+            | PtyEvent::Output { id, .. }
+            | PtyEvent::Exited { id, .. } => *id,
+            PtyEvent::Input { .. } | PtyEvent::Resize { .. } | PtyEvent::Kill { .. } => return,
+        };
+        if let Some(pane) = self.pane_mut(id) {
+            pane.on_pty_event(event);
+        }
+    }
+
+    /// Everything the panes want said to the engine's processes.
+    pub fn take_pty(&mut self) -> Vec<jmds_core::event::PtyEvent> {
+        let mut events = Vec::new();
+        for pane in self.panes.values_mut() {
+            events.extend(pane.take_pty());
+        }
+        events
     }
 
     /// Say something as the app, to whichever pane is focused.

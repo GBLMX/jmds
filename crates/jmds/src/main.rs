@@ -26,9 +26,11 @@ use jmds_api::{ChatMessage, Client, ClientConfig};
 use jmds_core::{
     agent::{Agent, AgentConfig},
     config::Config,
-    event::{AgentEvent, Event as BusEvent, EventBus, SessionEvent},
+    event::{AgentEvent, Event as BusEvent, EventBus, PtyEvent, SessionEvent},
+    pane::{Axis, PaneId},
     paths::sessions_dir,
     prompt::{Prompt, default_prompt_path},
+    pty::Run,
     session::{Header, SessionFile, branch, by_id, latest_in, new_id, recover},
     tools::set::ToolSet,
 };
@@ -274,12 +276,26 @@ async fn session_loop(
         }
         None => log::warn!("提示词文件打不开，这次只有对话面板"),
     }
-    match open_shell_pane(&cwd) {
-        Some(shell) => {
-            app.open(jmds_core::pane::Axis::Vertical, shell);
+    // The shell: a pane first, then a command in it. The pane is named before the command exists
+    // because the events about that command are routed by that name — and the process belongs to the
+    // engine rather than to the pane, because closing a split and stopping a program are different
+    // decisions that were being made by the same object.
+    let shell = shell_program();
+    let shell_id = PaneId::fresh();
+    let mut shell_run = match Run::spawn(shell_id, &shell, "", (24, 80), bus.clone()) {
+        Ok(run) => {
+            app.host_mut().open_as(
+                shell_id,
+                Axis::Vertical,
+                TerminalPane::new(shell_id, shell_title(&shell), (24, 80)),
+            );
+            Some(run)
         }
-        None => log::warn!("shell 起不来，这次没有终端面板"),
-    }
+        Err(error) => {
+            log::warn!("{shell} 起不来，这次没有终端面板：{error}");
+            None
+        }
+    };
     // The file tree, beside the shell: what changed, next to the thing that changes it. It opens
     // after the shell so the split divides the lower half rather than the whole right column.
     app.open(
@@ -338,6 +354,20 @@ async fn session_loop(
                     if quit {
                         break;
                     }
+                    // What the panes want said to the processes they show: keys already encoded as
+                    // a terminal would send them, and the size the pane was given. They go on the
+                    // bus because the pane has no process to write to and the app has no keyboard
+                    // encoding — each half does what it knows.
+                    for event in app.take_pty() {
+                        bus.publish(event);
+                    }
+                    // A pane that is gone should take its command with it: a process nobody can see
+                    // is a process nobody can stop. Asked here rather than decided by the pane's
+                    // `Drop`, because the pane never owned the process.
+                    if shell_run.is_some() && app.host().pane(shell_id).is_none() {
+                        bus.publish(PtyEvent::Kill { id: shell_id });
+                        shell_run = None;
+                    }
                 }
                 Some(Ok(TermEvent::Resize(..))) => {}
                 Some(Ok(_)) => {}
@@ -353,6 +383,9 @@ async fn session_loop(
                 }
                 Ok(BusEvent::File(file)) => {
                     app.on_file_event(&file);
+                }
+                Ok(BusEvent::Pty(pty)) => {
+                    app.on_pty_event(&pty);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
@@ -514,20 +547,25 @@ fn open_prompt_pane(cwd: &std::path::Path, tab_width: u8) -> Option<Editor> {
     }
 }
 
-/// A shell, in its own pane.
+/// The user's own shell, in its own pane: `$SHELL`, or `sh` when the environment does not say.
 ///
-/// The user's own shell (`$SHELL`), in the session's directory: the pane is for the commands a
-/// person runs by hand, which is why it is a real PTY and not the `bash` tool.
-fn open_shell_pane(cwd: &std::path::Path) -> Option<TerminalPane> {
-    let shell = TerminalPane::shell();
-    // A placeholder size: the first draw tells the PTY what the pane actually got.
-    match TerminalPane::spawn(&shell, &[], cwd, (24, 80)) {
-        Ok(pane) => Some(pane),
-        Err(error) => {
-            log::warn!("{shell} 起不来: {error}");
-            None
-        }
-    }
+/// This pane is for the commands a person runs by hand, which is why it is a real pty and not the
+/// `bash` tool.
+fn shell_program() -> String {
+    std::env::var("SHELL")
+        .ok()
+        .filter(|shell| !shell.trim().is_empty())
+        .unwrap_or_else(|| "sh".to_string())
+}
+
+/// A shell's name, for the pane's title: the last segment of its path.
+fn shell_title(shell: &str) -> String {
+    shell
+        .rsplit('/')
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or(shell)
+        .to_string()
 }
 
 /// What the model is told about itself and where it is.
@@ -574,6 +612,9 @@ mod tests {
     use jmds_tui::{app::App, pane::files::FileTree};
 
     use super::{Opening, cli, resolve};
+    use crate::PaneId;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+    use jmds_core::pty::Run;
 
     /// What the loop in [`session_loop`] does with one bus event, without a terminal.
     fn drawn(app: &mut App) -> String {
@@ -633,6 +674,58 @@ mod tests {
             screen.contains("delta.txt"),
             "事件到了，但文件树没显示它：\n{screen}"
         );
+    }
+
+    /// The last link of the pty chain: a key pressed in a terminal pane, through the app's outbox,
+    /// the bus, and the engine, into the command the pane is showing.
+    ///
+    /// The pane's own tests prove it encodes a key; the engine's prove an `Input` event reaches a
+    /// process. Neither can see the app in between, and the app is where a pane's outbox is
+    /// published at all.
+    #[tokio::test]
+    async fn a_key_pressed_in_a_terminal_pane_reaches_the_command_it_shows() {
+        let id = PaneId::fresh();
+        let bus = EventBus::new(64);
+        let _run = Run::spawn(id, "sh", "cat", (10, 40), bus.clone()).expect("一个 pty");
+
+        let mut app = App::new();
+        app.host_mut().open_as(
+            id,
+            Axis::Horizontal,
+            jmds_tui::pane::terminal::TerminalPane::new(id, "cat", (10, 40)),
+        );
+        // What the loop does with a key, and then with what the panes want said.
+        app.on_key(KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE));
+        let events = app.take_pty();
+        assert!(
+            matches!(
+                events.as_slice(),
+                [jmds_core::event::PtyEvent::Input { .. }, ..]
+            ),
+            "面板该把按键交出来：{events:?}"
+        );
+        for event in events {
+            bus.publish(event);
+        }
+
+        // `cat` echoes what it reads, so the letter coming back on the pane's own screen is the
+        // whole round trip: key -> app -> bus -> pty -> process -> output -> pane.
+        let mut incoming = bus.subscribe();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            if drawn(&mut app).contains('q') {
+                return;
+            }
+            // The pane only learns about output through the loop, so the loop's other half has to
+            // be here too: take what the engine published and hand it to the app.
+            while let Ok(event) = incoming.try_recv() {
+                if let Event::Pty(pty) = event {
+                    app.on_pty_event(&pty);
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("按键没有走到进程：\n{}", drawn(&mut app));
     }
 
     /// A session file for the given directory, with the given messages in it.

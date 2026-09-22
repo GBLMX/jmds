@@ -125,12 +125,40 @@ pub enum SessionEvent {
     Branched { from: String, to: String },
 }
 
+/// Something a command running under a pty did.
+///
+/// The engine owns the process and a pane owns the screen; these are how the second learns what the
+/// first saw. The `id` is the pane the engine opened for the command, which is why these are routed
+/// by id rather than handed to every pane: a terminal is not something a conversation has an
+/// opinion about.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PtyEvent {
+    /// The command is running, in this pane. Sent once, before any output, so a pane that has just
+    /// been opened knows what it is showing.
+    Started { id: PaneId, title: String },
+    /// Bytes the command wrote, in whatever sizes the reader got them in: a pty has no line
+    /// structure, and a subscriber that wants lines is looking at the wrong event.
+    Output { id: PaneId, bytes: Vec<u8> },
+    /// The command ended. `code` is what it exited with, when it exited rather than being killed.
+    Exited { id: PaneId, code: Option<i32> },
+    /// 面板不碰进程：按键先编码成字节，作为这个事件回到引擎，由引擎写进那个 pty。
+    /// 走的和 [`Self::Output`] 相反的那条路，id 也是同一个 pane。
+    Input { id: PaneId, bytes: Vec<u8> },
+    /// 面板拿到新尺寸时发这个，引擎把它交给对应的 `Run::resize`。终端程序要正确定位光标就得知道
+    /// 窗口有多大，而这个尺寸只有面板知道。
+    Resize { id: PaneId, rows: u16, cols: u16 },
+    /// 面板关掉了（Ctrl+W）。一个没人看得见的进程就是没人能停的进程，所以关掉面板必须说出来，
+    /// 引擎收到后杀掉那一组。
+    Kill { id: PaneId },
+}
+
 /// Every event, in one type, because a subscriber wants one stream rather than four.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Agent(AgentEvent),
     File(FileEvent),
     Pane(PaneEvent),
+    Pty(PtyEvent),
     Session(SessionEvent),
 }
 
@@ -148,6 +176,7 @@ from_event!(
     Agent(AgentEvent),
     File(FileEvent),
     Pane(PaneEvent),
+    Pty(PtyEvent),
     Session(SessionEvent),
 );
 

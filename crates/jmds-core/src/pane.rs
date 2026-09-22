@@ -26,6 +26,18 @@ impl PaneId {
         Self(raw)
     }
 
+    /// A fresh id, from the process's single source of them.
+    ///
+    /// Ids name a pane in events, and the engine starts commands in panes of its own naming — one of
+    /// those exists before the tree has heard of it, so the numbers cannot come from the tree alone.
+    /// Starting high keeps the small numbers hand-written in tests out of the way.
+    pub fn fresh() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(1 << 32);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
     pub const fn get(self) -> u64 {
         self.0
     }

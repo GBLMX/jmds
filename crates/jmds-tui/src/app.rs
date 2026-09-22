@@ -148,6 +148,16 @@ impl App {
         self.host.on_file_event(event);
     }
 
+    /// Hand a pty event to the pane it is about.
+    pub fn on_pty_event(&mut self, event: &jmds_core::event::PtyEvent) {
+        self.host.on_pty_event(event);
+    }
+
+    /// What the panes want said to the engine's processes.
+    pub fn take_pty(&mut self) -> Vec<jmds_core::event::PtyEvent> {
+        self.host.take_pty()
+    }
+
     /// A frame passed. The loop that owns the clock calls this, which is what animates a pane with
     /// something to show while a turn runs.
     pub fn tick(&mut self) {

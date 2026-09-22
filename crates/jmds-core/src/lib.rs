@@ -15,6 +15,7 @@ pub mod logger;
 pub mod pane;
 pub mod paths;
 pub mod prompt;
+pub mod pty;
 pub mod session;
 pub mod tools;
 pub mod watch;
