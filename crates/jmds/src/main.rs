@@ -26,7 +26,7 @@ use jmds_api::{ChatMessage, Client, ClientConfig};
 use jmds_core::{
     agent::{Agent, AgentConfig},
     config::Config,
-    event::{AgentEvent, Event as BusEvent, EventBus, PtyEvent, SessionEvent},
+    event::{AgentEvent, Event as BusEvent, EventBus, SessionEvent},
     pane::{Axis, PaneId},
     paths::sessions_dir,
     prompt::{Prompt, default_prompt_path},
@@ -282,7 +282,8 @@ async fn session_loop(
     // decisions that were being made by the same object.
     let shell = shell_program();
     let shell_id = PaneId::fresh();
-    let mut shell_run = match Run::spawn(shell_id, &shell, "", (24, 80), bus.clone()) {
+    // Kept alive for the length of the session: dropping the run stops the shell.
+    let _shell_run = match Run::spawn(shell_id, &shell, "", (24, 80), bus.clone()) {
         Ok(run) => {
             app.host_mut().open_as(
                 shell_id,
@@ -361,13 +362,6 @@ async fn session_loop(
                     for event in app.take_pty() {
                         bus.publish(event);
                     }
-                    // A pane that is gone should take its command with it: a process nobody can see
-                    // is a process nobody can stop. Asked here rather than decided by the pane's
-                    // `Drop`, because the pane never owned the process.
-                    if shell_run.is_some() && app.host().pane(shell_id).is_none() {
-                        bus.publish(PtyEvent::Kill { id: shell_id });
-                        shell_run = None;
-                    }
                 }
                 Some(Ok(TermEvent::Resize(..))) => {}
                 Some(Ok(_)) => {}
@@ -386,6 +380,9 @@ async fn session_loop(
                 }
                 Ok(BusEvent::Pty(pty)) => {
                     app.on_pty_event(&pty);
+                }
+                Ok(BusEvent::Pane(pane)) => {
+                    app.on_pane_event(&pane);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {

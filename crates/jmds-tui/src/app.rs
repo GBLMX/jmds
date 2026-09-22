@@ -153,6 +153,59 @@ impl App {
         self.host.on_pty_event(event);
     }
 
+    /// The engine opened or closed a pane.
+    ///
+    /// Opening one is the app's act even though the engine asks for it: where a pane goes is a
+    /// layout decision, and the engine has no idea what the screen looks like. A terminal asked for
+    /// by a running command is placed beside the shell rather than beside whatever happens to have
+    /// focus, because a command's output belongs with the other commands.
+    pub fn on_pane_event(&mut self, event: &jmds_core::event::PaneEvent) {
+        use jmds_core::event::PaneEvent;
+        use jmds_core::pane::PaneKind;
+
+        match event {
+            PaneEvent::Opened { spec } => {
+                if self.host.pane(spec.id).is_some() {
+                    // Already there: the engine may have published this twice around a restart, and
+                    // two panes for one command would be two screens for one screen's worth of output.
+                    return;
+                }
+                if spec.kind != PaneKind::Terminal {
+                    log::warn!("不知道该怎么开一个 {:?} 面板", spec.kind);
+                    return;
+                }
+                let pane =
+                    crate::pane::terminal::TerminalPane::new(spec.id, spec.title.clone(), (10, 40));
+                let beside = self.shell_pane();
+                let was = self.host.focused_id();
+                if let Some(near) = beside {
+                    self.host.focus(near);
+                }
+                self.host
+                    .open_as(spec.id, jmds_core::pane::Axis::Horizontal, pane);
+                if let Some(was) = was {
+                    self.host.focus(was);
+                }
+            }
+            PaneEvent::Closed { id } => {
+                self.host.close(*id);
+            }
+            // Focus and geometry are the tree's own business, and a title it already has.
+            _ => {}
+        }
+    }
+
+    /// The pane a command's output belongs beside: the one the shell is showing in.
+    fn shell_pane(&self) -> Option<jmds_core::pane::PaneId> {
+        use jmds_core::pane::PaneKind;
+
+        self.host
+            .tree()
+            .leaves()
+            .into_iter()
+            .find(|id| self.host.pane(*id).map(|pane| pane.kind()) == Some(PaneKind::Terminal))
+    }
+
     /// What the panes want said to the engine's processes.
     pub fn take_pty(&mut self) -> Vec<jmds_core::event::PtyEvent> {
         self.host.take_pty()
@@ -422,6 +475,65 @@ mod tests {
         for (index, log) in logs.iter().enumerate() {
             assert_eq!(log.borrow().files, 1, "第 {} 个 pane 也该被告知", index + 1);
         }
+    }
+
+    #[test]
+    fn a_terminal_asked_for_by_the_engine_appears_beside_the_shell() {
+        use jmds_core::event::PaneEvent;
+        use jmds_core::pane::{PaneId, PaneSpec};
+
+        let mut app = App::new();
+        let shell = PaneId::fresh();
+        app.open(
+            Axis::Horizontal,
+            crate::pane::terminal::TerminalPane::new(shell, "sh", (10, 40)),
+        );
+        let chat = app.open(Axis::Horizontal, Recorder::new(false).0);
+
+        let tool = PaneId::fresh();
+        app.on_pane_event(&PaneEvent::Opened {
+            spec: PaneSpec::new(tool, jmds_core::pane::PaneKind::Terminal).with_title("cargo test"),
+        });
+
+        assert_eq!(
+            app.host().pane(tool).map(|pane| pane.title().to_string()),
+            Some("cargo test".to_string())
+        );
+        assert_eq!(
+            app.host().focused_id(),
+            Some(chat),
+            "焦点不该被一个工具面板抢走"
+        );
+        // The engine may say it twice around a restart, and two panes for one command would be two
+        // screens for one screen's worth of output.
+        app.on_pane_event(&PaneEvent::Opened {
+            spec: PaneSpec::new(tool, jmds_core::pane::PaneKind::Terminal).with_title("cargo test"),
+        });
+        assert_eq!(app.host().len(), 3, "只该有一个工具面板");
+
+        app.on_pane_event(&PaneEvent::Closed { id: tool });
+        assert!(app.host().pane(tool).is_none());
+    }
+
+    #[test]
+    fn closing_a_terminal_pane_tells_the_engine_to_stop_its_command() {
+        use jmds_core::event::PtyEvent;
+        use jmds_core::pane::PaneId;
+
+        let mut app = App::new();
+        let shell = PaneId::fresh();
+        app.open(
+            Axis::Horizontal,
+            crate::pane::terminal::TerminalPane::new(shell, "sh", (10, 40)),
+        );
+        assert!(app.host_mut().close(shell));
+        assert_eq!(app.take_pty(), vec![PtyEvent::Kill { id: shell }]);
+        assert!(app.take_pty().is_empty(), "交出去的就是交出去了");
+
+        // A pane with no command behind it closes quietly: there is no process to tell.
+        let chat = app.open(Axis::Horizontal, Recorder::new(false).0);
+        assert!(app.host_mut().close(chat));
+        assert!(app.take_pty().is_empty());
     }
 
     #[test]

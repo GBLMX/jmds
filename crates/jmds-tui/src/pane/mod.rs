@@ -27,7 +27,7 @@ use std::collections::BTreeMap;
 
 use crossterm::event::KeyEvent;
 use jmds_core::{
-    event::AgentEvent,
+    event::{AgentEvent, PtyEvent},
     pane::{Axis, PaneId, PaneKind, PaneTree, Rect as PaneRect},
 };
 use ratatui::{
@@ -162,6 +162,9 @@ pub struct PaneHost {
     geometry: Vec<(PaneId, PaneRect)>,
     /// One theme for the whole host, passed down to every pane as it is drawn.
     theme: Theme,
+    /// Panes that have closed since the last frame, as the news their commands need. Kept apart
+    /// from what the panes themselves say because a closed pane has nothing left to say with.
+    closing: Vec<PtyEvent>,
 }
 
 impl Default for PaneHost {
@@ -182,6 +185,7 @@ impl PaneHost {
             panes: BTreeMap::new(),
             geometry: Vec::new(),
             theme,
+            closing: Vec::new(),
         }
     }
 
@@ -228,9 +232,20 @@ impl PaneHost {
     }
 
     /// Close a pane. Focus goes back to where it came from, which the tree decides.
+    ///
+    /// A terminal pane that closes says so: the command it was showing has to be stopped, and the
+    /// pane never owned it — the engine did. It goes on the same outbox the panes use, so there is
+    /// one place where "something wants to tell a process something" is answered.
     pub fn close(&mut self, id: PaneId) -> bool {
+        let was_terminal = self
+            .panes
+            .get(&id)
+            .is_some_and(|pane| pane.kind() == PaneKind::Terminal);
         if self.panes.remove(&id).is_none() {
             return false;
+        }
+        if was_terminal {
+            self.closing.push(jmds_core::event::PtyEvent::Kill { id });
         }
         let closed = self.tree.close(id);
         self.geometry.retain(|(open, _)| *open != id);
@@ -406,8 +421,6 @@ impl PaneHost {
     /// The events that go the other way — keys, resizes, kills — are not for a pane: they are what
     /// the panes asked for, on their way to the engine, and the app publishes them.
     pub fn on_pty_event(&mut self, event: &jmds_core::event::PtyEvent) {
-        use jmds_core::event::PtyEvent;
-
         let id = match event {
             PtyEvent::Started { id, .. }
             | PtyEvent::Output { id, .. }
