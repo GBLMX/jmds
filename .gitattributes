@@ -1,0 +1,3 @@
+# 仓库里有脚本与 workflow：统一 LF，免得 Windows 上 checkout 出 CRLF 让 sh -n / 钩子出怪问题。
+* text=auto eol=lf
+*.tar.gz binary

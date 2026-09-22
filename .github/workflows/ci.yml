@@ -1,0 +1,124 @@
+name: CI
+
+# 自用项目：这里保留的都是**会真的拦住我**的检查 —— 格式（nightly 专有选项）、clippy 警告即失败、
+# 三平台测试矩阵（Windows 那一格会真的编译并跑移植来的 `#[cfg(windows)]` 路径）。
+# 没有的东西也刻意没有：aarch64 交叉（不分发）、基准 job（还没有值得跟踪的基准）、
+# 系统依赖安装那一步（不用 ALSA 之类的系统库）。
+permissions:
+  contents: read
+
+on:
+  pull_request:
+    paths-ignore:
+      - 'README.md'
+      - 'CHANGELOG.md'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'CHANGELOG.md'
+
+env:
+  CARGO_TERM_COLOR: always
+
+# 被顶掉的旧 push 不再占用 runner：分支上最新那个提交才是有人会看结果的。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  skip-check:
+    name: skip release commits
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      skip: ${{ steps.check.outputs.skip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.ref }}
+          fetch-depth: 1
+      - name: Check commit message
+        id: check
+        run: |
+          msg="$(git log -1 --format='%s')"
+          if [[ "$msg" == release* ]]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  fmt:
+    name: fmt
+    needs: skip-check
+    if: needs.skip-check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      # nightly 不是选择：rustfmt.toml 里的 `imports_granularity` / `group_imports` 是 nightly
+      # 专有选项，stable 的 cargo fmt 看不见它们、会把未格式化的树报成没问题。
+      - name: Install Rust nightly (rustfmt)
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      - name: check formatting
+        run: cargo +nightly fmt -- --check
+
+  clippy:
+    name: clippy
+    needs: skip-check
+    if: needs.skip-check.outputs.skip == 'false'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      checks: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: Run clippy action
+        uses: clechasseur/rs-clippy-check@v5
+        with:
+          # `-- -D warnings` 放在末尾是该 action 的用法：它把 `--message-format=json` 放在用户参数
+          # 之前，正是给末尾这些 rustc 参数让位；警告因此变成非 0 退出码，这一步才会真的红。
+          args: --workspace --all-targets -- -D warnings
+
+  test:
+    needs: skip-check
+    if: needs.skip-check.outputs.skip == 'false'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    name: test ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+      - name: cargo generate-lockfile
+        if: hashFiles('Cargo.lock') == ''
+        run: cargo generate-lockfile
+      # `--workspace` 也会跑 `crates/*` 成员的测试，只看包会静默漏掉它们。
+      - name: cargo test --locked
+        run: cargo test --locked --workspace --all-features

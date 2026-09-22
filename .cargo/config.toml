@@ -1,0 +1,9 @@
+# 本机自用：把基线抬到 x86-64-v3（AVX2，Haswell 2013+），并用随 rustc 一起发的 lld 链接。
+# 代价是产物需要 AVX2 —— 一旦要分发给别人的老机器，把 `target-cpu` 那一项去掉即可。
+#
+# `-fuse-ld=lld` 是 Unix 开关（Windows 的 link.exe 不认，只会每次链接打一行 LNK4044）。
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=lld", "-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

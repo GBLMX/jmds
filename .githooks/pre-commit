@@ -1,0 +1,46 @@
+#!/bin/sh
+# Format check before a commit.
+#
+# CI runs `cargo +nightly fmt -- --check` on every push, and the repo's rustfmt options are
+# nightly-only: a stable `cargo fmt` cannot see them, reports the tree as fine, and the push
+# fails. This hook runs the same check before the commit instead.
+#
+# Enable it once per clone:
+#
+#   git config core.hooksPath .githooks
+#
+# On failure the hook formats the tree itself and stops the commit, so the fix is a `git add`
+# and a second `git commit` rather than a trip to the CI logs.
+
+# A clone without cargo (a docs checkout, a CI runner) still commits fine: git runs hooks from
+# whatever shell it has, not from a Rust environment.
+if ! command -v cargo >/dev/null 2>&1; then
+    exit 0
+fi
+
+# The repo formats with nightly options (`imports_granularity`, `group_imports`); stable rustfmt
+# rejects them outright, so there is nothing useful to check without it.
+if ! cargo +nightly fmt --version >/dev/null 2>&1; then
+    echo "pre-commit: 没有 nightly rustfmt，跳过格式检查（CI 会检查）。" >&2
+    echo "           装上它：rustup toolchain install nightly --component rustfmt" >&2
+    exit 0
+fi
+
+# On Windows the working copy is checked out with CRLF and rustfmt would otherwise report every
+# file as unformatted; this keeps the check about formatting and not about line endings.
+case "$(uname -s 2>/dev/null)" in
+    MINGW* | MSYS* | CYGWIN*) NEWLINE="--config newline_style=Windows" ;;
+    *) NEWLINE="" ;;
+esac
+
+if cargo +nightly fmt -- $NEWLINE --check >/dev/null 2>&1; then
+    exit 0
+fi
+
+echo "pre-commit: 格式没跑过（nightly 的选项跟 CI 一致），正在格式化…" >&2
+if cargo +nightly fmt -- $NEWLINE >/dev/null 2>&1; then
+    echo "pre-commit: 已格式化。请 git add 后再提交（这次的提交被拦下来了）。" >&2
+else
+    echo "pre-commit: 格式化失败，请手动跑：cargo +nightly fmt -- $NEWLINE" >&2
+fi
+exit 1
