@@ -132,6 +132,12 @@ async fn session_loop(
         }
         None => log::warn!("shell 起不来，这次没有终端面板"),
     }
+    // The file tree, beside the shell: what changed, next to the thing that changes it. It opens
+    // after the shell so the split divides the lower half rather than the whole right column.
+    app.open(
+        jmds_core::pane::Axis::Horizontal,
+        jmds_tui::pane::files::FileTree::new(cwd.clone()),
+    );
     // Focus ends in the chat: that is where a turn is started from.
     app.host_mut().focus(chat);
 
@@ -378,4 +384,74 @@ fn choose_theme(config: &Config) -> Theme {
         .unwrap_or_default()
         .with_glyphs(glyphs)
         .downsampled(mode)
+}
+
+#[cfg(test)]
+mod tests {
+    use jmds_core::{
+        event::{Event, EventBus},
+        pane::Axis,
+        watch::Watcher,
+    };
+    use jmds_tui::{app::App, pane::files::FileTree};
+
+    /// What the loop in [`session_loop`] does with one bus event, without a terminal.
+    fn drawn(app: &mut App) -> String {
+        let area = ratatui::layout::Rect::new(0, 0, 60, 14);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        app.draw(area, &mut buffer);
+        let mut out = String::new();
+        for row in 0..area.height {
+            for column in 0..area.width {
+                out.push_str(buffer[(column, row)].symbol());
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The whole chain the app depends on: a watcher on the session's directory, the bus, the app's
+    /// fan-out, and the file tree. Every link has its own tests; this one exists because the chain
+    /// is the part that can be wired wrong while all the links pass.
+    #[tokio::test]
+    async fn a_file_written_by_someone_else_turns_up_in_the_file_tree() {
+        let dir = std::env::temp_dir().join(format!("jmds-wiring-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bus = EventBus::new(64);
+        let _watcher = Watcher::watch(&dir, bus.clone()).expect("一个监视器");
+        let mut app = App::new();
+        app.open(Axis::Horizontal, FileTree::new(dir.clone()));
+        let mut events = bus.subscribe();
+
+        std::fs::write(dir.join("delta.txt"), "written from outside\n").unwrap();
+
+        // Wait for whatever the watcher publishes, then hand it to the app exactly as the loop does.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut handed = 0;
+        while std::time::Instant::now() < deadline {
+            match events.try_recv() {
+                Ok(Event::File(file)) => {
+                    app.on_file_event(&file);
+                    handed += 1;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                Err(error) => panic!("总线不该断开：{error:?}"),
+            }
+            if handed > 0 && drawn(&mut app).contains("delta.txt") {
+                break;
+            }
+        }
+
+        let screen = drawn(&mut app);
+        assert!(handed > 0, "监视器没有发布任何文件事件：\n{screen}");
+        assert!(
+            screen.contains("delta.txt"),
+            "事件到了，但文件树没显示它：\n{screen}"
+        );
+    }
 }

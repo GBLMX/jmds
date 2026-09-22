@@ -42,8 +42,9 @@ pub enum Change {
 impl Change {
     /// How a second notification for the same path folds into the first one, if at all.
     ///
-    /// Three cases, and everything else is "the later state is the truth": a file created and then
-    /// written is a change, a file changed and then deleted is gone.
+    /// The rule is that the more informative of the two survives, not simply the later one. A file
+    /// created and then written was created: a listing needs to know to look again, and "it changed"
+    /// would leave a new file invisible until something else happened to refresh the list.
     fn merge(self, next: Self) -> Option<Self> {
         use Change::*;
         match (self, next) {
@@ -54,6 +55,8 @@ impl Change {
             // Created and gone again inside one window is a temporary file that came and went.
             // Nobody needs to hear about it.
             (Created, Removed) => None,
+            // New, and then written to, in the same breath.
+            (Created, Changed) => Some(Created),
             (_, next) => Some(next),
         }
     }
@@ -442,7 +445,7 @@ mod tests {
     #[test]
     fn a_save_is_one_change_not_five() {
         let mut batch = Batch::default();
-        batch.absorb(PathBuf::from("src/main.rs"), Change::Created);
+        batch.absorb(PathBuf::from("src/main.rs"), Change::Changed);
         batch.absorb(PathBuf::from("src/main.rs"), Change::Changed);
         batch.absorb(PathBuf::from("src/main.rs"), Change::Changed);
         assert_eq!(
@@ -452,6 +455,31 @@ mod tests {
             }]
         );
         assert!(batch.is_empty(), "抽干了就是抽干了");
+    }
+
+    #[test]
+    fn a_file_created_and_then_written_is_still_a_creation() {
+        // The two notifications every new file produces. Reporting it as merely "changed" would
+        // leave it invisible in anything that lists a directory by looking only when it hears of a
+        // new entry — which is exactly what a file tree does.
+        let mut batch = Batch::default();
+        batch.absorb(PathBuf::from("delta.txt"), Change::Created);
+        batch.absorb(PathBuf::from("delta.txt"), Change::Changed);
+        assert_eq!(
+            batch.drain(),
+            vec![FileEvent::Created {
+                path: PathBuf::from("delta.txt")
+            }]
+        );
+    }
+
+    #[test]
+    fn a_temporary_file_created_written_and_deleted_is_still_nothing() {
+        let mut batch = Batch::default();
+        batch.absorb(PathBuf::from(".a.txt.swp"), Change::Created);
+        batch.absorb(PathBuf::from(".a.txt.swp"), Change::Changed);
+        batch.absorb(PathBuf::from(".a.txt.swp"), Change::Removed);
+        assert_eq!(batch.drain(), Vec::new());
     }
 
     #[test]

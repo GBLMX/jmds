@@ -281,14 +281,16 @@ mod tests {
     /// The keys one pane was given, shared with the pane so the test can read them afterwards.
     type Recorded = Rc<RefCell<Vec<KeyCode>>>;
 
-    /// A pane whose answers the test chooses, and which records the keys it was given.
-    /// What the app said to a pane: notes it was given, and how often it was cleared.
+    /// What the app said to a pane: notes it was given, how often it was cleared, and how many file
+    /// events reached it.
     #[derive(Debug, Default)]
     struct Log {
         notes: Vec<String>,
         clears: usize,
+        files: usize,
     }
 
+    /// A pane whose answers the test chooses, and which records what it was given.
     struct Recorder {
         handles: bool,
         keys: Recorded,
@@ -344,6 +346,10 @@ mod tests {
             self.log.borrow_mut().notes.push(text.to_string());
         }
 
+        fn on_file_event(&mut self, _event: &jmds_core::event::FileEvent) {
+            self.log.borrow_mut().files += 1;
+        }
+
         fn clear(&mut self) {
             self.log.borrow_mut().clears += 1;
         }
@@ -387,6 +393,25 @@ mod tests {
         let mut app = App::new();
         app.open(Axis::Horizontal, Recorder::with_log(false, log.clone()).0);
         (app, log)
+    }
+
+    #[test]
+    fn a_file_event_reaches_every_pane_not_only_the_one_in_focus() {
+        let mut app = App::new();
+        let mut logs = Vec::new();
+        for _ in 0..3 {
+            let log = Rc::new(RefCell::new(Log::default()));
+            app.open(Axis::Horizontal, Recorder::with_log(false, log.clone()).0);
+            logs.push(log);
+        }
+        assert_eq!(app.host().focused_id(), Some(app.host().tree().leaves()[2]));
+
+        app.on_file_event(&jmds_core::event::FileEvent::Changed {
+            path: "/work/a.txt".into(),
+        });
+        for (index, log) in logs.iter().enumerate() {
+            assert_eq!(log.borrow().files, 1, "第 {} 个 pane 也该被告知", index + 1);
+        }
     }
 
     #[test]
