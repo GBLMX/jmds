@@ -16,7 +16,7 @@ body = """
     {% for commit in commits %}
         - {% if commit.scope %}*({{ commit.scope }})* {% endif %}\
             {% if commit.breaking %}[**breaking**] {% endif %}\
-            {{ commit.message | upper_first }} ({{ commit.author.name }})\
+            {{ commit.message | split(pat="\n") | first | upper_first }} ({{ commit.author.name }})\
     {% endfor %}
 {% endfor %}
 """
@@ -39,7 +39,12 @@ postprocessors = [
 # See https://www.conventionalcommits.org
 conventional_commits = true
 # Exclude commits that do not match the conventional commits specification.
-filter_unconventional = true
+#
+# Off, because this repository's commits are prose: a subject that says what changed and why, in a
+# sentence, rather than `feat(scope): …`. On, every one of them was dropped before the parsers ran and
+# the release notes came out as a bare heading — v0.1.1's did exactly that. The parsers below still
+# sort the conventional ones into their groups, and the catch-all keeps the rest.
+filter_unconventional = false
 # Require all commits to be conventional.
 # Takes precedence over filter_unconventional.
 require_conventional = false
