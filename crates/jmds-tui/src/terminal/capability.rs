@@ -205,15 +205,17 @@ mod terminal_mode_tests {
 
     /// These bytes are the contract with the terminal, and the pop is the one that
     /// matters most: a terminal left in the keyboard protocol feeds the shell after
-    /// jmds `CSI u` encodings instead of plain keys.
+    /// jmds `CSI u` encodings instead of plain keys. The mouse is the same kind of
+    /// debt — left capturing, it can no longer select text — which is why it is the
+    /// last thing let go rather than the first.
     #[test]
     fn terminal_modes_are_entered_and_left_with_the_documented_sequences() {
         let mut out = Vec::new();
         enable_terminal_modes(&mut out).expect("enable");
         assert_eq!(
             String::from_utf8(out).expect("utf8"),
-            "\u{1b}[?2004h\u{1b}[>1u",
-            "bracketed paste on, then keyboard protocol with disambiguation"
+            "\u{1b}[?2004h\u{1b}[>1u\u{1b}[?1000h\u{1b}[?1006h",
+            "paste on, keyboard protocol with disambiguation, then the mouse in SGR coordinates"
         );
 
         let mut out = Vec::new();
@@ -223,8 +225,8 @@ mod terminal_mode_tests {
         // alternate screen: the main and alternate screens keep separate stacks.
         assert_eq!(
             String::from_utf8(out).expect("utf8"),
-            "\u{1b}[?2004l\u{1b}[<1u",
-            "paste off, keyboard protocol popped"
+            "\u{1b}[?2004l\u{1b}[<1u\u{1b}[?1006l\u{1b}[?1000l",
+            "paste off, keyboard protocol popped, mouse let go"
         );
     }
 

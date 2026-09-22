@@ -363,6 +363,9 @@ async fn session_loop(
                         bus.publish(event);
                     }
                 }
+                Some(Ok(TermEvent::Mouse(mouse))) => {
+                    app.on_mouse(mouse);
+                }
                 Some(Ok(TermEvent::Resize(..))) => {}
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
@@ -723,6 +726,78 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         panic!("按键没有走到进程：\n{}", drawn(&mut app));
+    }
+
+    /// The whole point of the tool pane, end to end: a `bash` call asked for by the agent turns into
+    /// a pane showing its output, and a `Ctrl+C` typed into that pane stops the call.
+    ///
+    /// Three links are tested where they live — the engine opens panes and stops on `0x03`, the app
+    /// publishes what its panes ask for, the pane renders bytes — and this one exists because the
+    /// chain is what can be wired wrong while every link passes.
+    #[tokio::test]
+    async fn a_bash_call_shows_in_a_pane_and_a_ctrl_c_there_stops_it() {
+        use jmds_core::event::PaneEvent;
+        use jmds_core::tools::set::ToolSet;
+
+        let bus = EventBus::new(256);
+        let mut app = App::new();
+        let mut incoming = bus.subscribe();
+        let tools = ToolSet::new("/tmp").with_bus(bus.clone());
+
+        // The call runs the way the agent runs it: the tool set, with the bus, called by name.
+        let call = tokio::spawn(async move {
+            tools
+                .call("bash", r#"{"command":"echo from-the-tool; sleep 30"}"#)
+                .await
+        });
+
+        // The loop's two halves, without a terminal: the engine asks for panes, and pty events go to
+        // the pane they are about.
+        let mut tool_pane = None;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            while let Ok(event) = incoming.try_recv() {
+                match event {
+                    Event::Pane(pane) => {
+                        if let PaneEvent::Opened { spec } = &pane {
+                            tool_pane = Some(spec.id);
+                        }
+                        app.on_pane_event(&pane);
+                    }
+                    Event::Pty(pty) => app.on_pty_event(&pty),
+                    _ => {}
+                }
+            }
+            if tool_pane.is_some() && drawn(&mut app).contains("from-the-tool") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let pane = tool_pane.expect("引擎该为这次调用开一个面板");
+        assert!(
+            drawn(&mut app).contains("from-the-tool"),
+            "工具的输出该在它自己的面板上：\n{}",
+            drawn(&mut app)
+        );
+
+        // `Ctrl+C` in that pane, the way a person does it: focus it, press the key, and let the app
+        // publish what the pane wants said.
+        app.host_mut().focus(pane);
+        app.on_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        for event in app.take_pty() {
+            bus.publish(event);
+        }
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .expect("被叫停的调用该很快回来")
+            .expect("任务不该 panic");
+        assert!(outcome.ok, "{}", outcome.content);
+        assert!(
+            outcome.summary.contains("interrupted"),
+            "结果该说它是被叫停的：{}",
+            outcome.summary
+        );
     }
 
     /// A session file for the given directory, with the given messages in it.

@@ -258,6 +258,14 @@ impl Pane for TerminalPane {
         // show it even when nothing is being pressed.
         self.drain_pending();
     }
+
+    /// The wheel scrolls the scrollback, the way a terminal does: output keeps arriving and the view
+    /// stays where the reader put it.
+    fn on_scroll(&mut self, steps: isize, _height: u16) {
+        let screen = self.parser.screen_mut();
+        let wanted = screen.scrollback() as isize + steps;
+        screen.set_scrollback(wanted.clamp(0, SCROLLBACK as isize) as usize);
+    }
 }
 
 /// A `KeyEvent` as the bytes a terminal would send for it.

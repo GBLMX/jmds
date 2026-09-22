@@ -665,6 +665,20 @@ impl Pane for Chat {
         Chat::clear(self);
     }
 
+    /// The wheel: older lines up, the newest down. Reaching the bottom pins the view again, so
+    /// there is a way back to following without hunting for it.
+    fn on_scroll(&mut self, steps: isize, _height: u16) {
+        if steps > 0 {
+            self.follow = false;
+            self.scroll = self.scroll.saturating_add(steps as usize);
+        } else {
+            self.scroll = self.scroll.saturating_sub(steps.unsigned_abs());
+            if self.scroll == 0 {
+                self.follow = true;
+            }
+        }
+    }
+
     fn take_requests(&mut self) -> Vec<String> {
         self.take_outbox()
     }

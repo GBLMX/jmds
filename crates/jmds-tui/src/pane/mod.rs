@@ -135,6 +135,13 @@ pub trait Pane {
         Vec::new()
     }
 
+    /// The wheel, in steps: positive is up. `height` is how many rows the pane was last given, for
+    /// panes whose scrolling is in rows rather than in items.
+    ///
+    /// Only ever an addition to a key binding, never the only way to do something: the mouse is a
+    /// second mouth, and a terminal app is used by people whose hands are on the keyboard.
+    fn on_scroll(&mut self, _steps: isize, _height: u16) {}
+
     /// Add a line from the app itself, for panes that have somewhere to put one.
     fn note(&mut self, _text: &str) {}
 
@@ -434,11 +441,30 @@ impl PaneHost {
 
     /// Everything the panes want said to the engine's processes.
     pub fn take_pty(&mut self) -> Vec<jmds_core::event::PtyEvent> {
-        let mut events = Vec::new();
+        // What closed comes first: those are the panes that are gone, and a pane's own outbox is
+        // read before the frame that would have drawn it.
+        let mut events: Vec<PtyEvent> = std::mem::take(&mut self.closing);
         for pane in self.panes.values_mut() {
             events.extend(pane.take_pty());
         }
         events
+    }
+
+    /// Send the wheel to one pane.
+    ///
+    /// Aimed by the caller, which hit-tests: scrolling the pane the pointer is *not* over is a pane
+    /// moving for no reason the person can see. The pane is told how tall it was last drawn, because
+    /// a pane that scrolls in rows cannot clamp its own view without knowing how many fit.
+    pub fn scroll(&mut self, id: PaneId, steps: isize) {
+        let height = self
+            .geometry
+            .iter()
+            .find(|(pane, _)| *pane == id)
+            .map(|(_, rect)| rect.height)
+            .unwrap_or(0);
+        if let Some(pane) = self.panes.get_mut(&id) {
+            pane.on_scroll(steps, height);
+        }
     }
 
     /// Say something as the app, to whichever pane is focused.

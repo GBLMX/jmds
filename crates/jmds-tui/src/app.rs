@@ -23,7 +23,7 @@
 //! navigation impossible. Every key in the first set is one no pane can want for editing — quit,
 //! close, cycle, jump — so the app takes them and the pane gets everything else.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use jmds_core::{event::AgentEvent, pane::Axis};
 use ratatui::{buffer::Buffer, layout::Rect};
 
@@ -87,6 +87,36 @@ impl App {
         // Everything else is the pane's, whether it uses it or not.
         self.host.on_key(key);
         Action::Continue
+    }
+
+    /// One mouse event.
+    ///
+    /// A second way to say what the keys say: a click focuses, and the wheel scrolls the pane it is
+    /// over. Neither is the only way to do anything — this is a terminal app, and the keyboard is
+    /// the first mouth.
+    pub fn on_mouse(&mut self, mouse: MouseEvent) -> Action {
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(id) = self.host.pane_at(mouse.column, mouse.row) {
+                    self.host.focus(id);
+                }
+            }
+            MouseEventKind::ScrollUp => self.scroll_at(&mouse, 1),
+            MouseEventKind::ScrollDown => self.scroll_at(&mouse, -1),
+            _ => {}
+        }
+        Action::Continue
+    }
+
+    /// Send the wheel to the pane under the pointer.
+    ///
+    /// Aimed, unlike a click: what a click means is "give this pane the keyboard", which is a change
+    /// of where the person is, and what a wheel means is "move that", which is about what the
+    /// pointer is over.
+    fn scroll_at(&mut self, mouse: &MouseEvent, steps: isize) {
+        if let Some(id) = self.host.pane_at(mouse.column, mouse.row) {
+            self.host.scroll(id, steps);
+        }
     }
 
     /// The keys the app answers itself, and the only place a pane can be closed from.
@@ -351,6 +381,7 @@ mod tests {
         notes: Vec<String>,
         clears: usize,
         files: usize,
+        scrolled: isize,
     }
 
     /// A pane whose answers the test chooses, and which records what it was given.
@@ -411,6 +442,10 @@ mod tests {
 
         fn on_file_event(&mut self, _event: &jmds_core::event::FileEvent) {
             self.log.borrow_mut().files += 1;
+        }
+
+        fn on_scroll(&mut self, steps: isize, _height: u16) {
+            self.log.borrow_mut().scrolled += steps;
         }
 
         fn clear(&mut self) {
@@ -522,7 +557,10 @@ mod tests {
 
         let mut app = App::new();
         let shell = PaneId::fresh();
-        app.open(
+        // Opened under the id the engine will name it by, which is how a pane a command runs in
+        // gets its name: `open` would mint one of its own and no event would ever match it.
+        app.host_mut().open_as(
+            shell,
             Axis::Horizontal,
             crate::pane::terminal::TerminalPane::new(shell, "sh", (10, 40)),
         );
@@ -534,6 +572,74 @@ mod tests {
         let chat = app.open(Axis::Horizontal, Recorder::new(false).0);
         assert!(app.host_mut().close(chat));
         assert!(app.take_pty().is_empty());
+    }
+
+    /// An app with three recorder panes, and the log each of them writes to.
+    fn app_with_three_logs() -> (App, Vec<Rc<RefCell<Log>>>) {
+        let mut app = App::new();
+        let mut logs = Vec::new();
+        for _ in 0..3 {
+            let log = Rc::new(RefCell::new(Log::default()));
+            app.open(Axis::Horizontal, Recorder::with_log(false, log.clone()).0);
+            logs.push(log);
+        }
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buffer = Buffer::empty(area);
+        // A frame first: the mouse is hit-tested against what was last drawn, so there is nothing to
+        // click on until something has been.
+        app.draw(area, &mut buffer);
+        (app, logs)
+    }
+
+    fn mouse(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    fn inside(app: &App, index: usize) -> (PaneId, u16, u16) {
+        let (id, rect) = app.host().geometry()[index];
+        (id, rect.x + 1, rect.y + 1)
+    }
+
+    #[test]
+    fn a_click_gives_the_pane_under_the_pointer_the_keyboard() {
+        let (mut app, _) = app_with_three_logs();
+        let (target, column, row) = inside(&app, 1);
+        assert_ne!(app.host().focused_id(), Some(target), "先是别的面板");
+
+        assert_eq!(
+            app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), column, row)),
+            Action::Continue
+        );
+        assert_eq!(app.host().focused_id(), Some(target));
+    }
+
+    #[test]
+    fn the_wheel_moves_the_pane_under_the_pointer_not_the_focused_one() {
+        let (mut app, logs) = app_with_three_logs();
+        let (_, column, row) = inside(&app, 0);
+        let focused = app.host().focused_id();
+
+        app.on_mouse(mouse(MouseEventKind::ScrollUp, column, row));
+        assert_eq!(logs[0].borrow().scrolled, 1, "指针下面那个该动");
+        for (index, log) in logs.iter().enumerate().skip(1) {
+            assert_eq!(log.borrow().scrolled, 0, "第 {} 个面板不该动", index + 1);
+        }
+        assert_eq!(app.host().focused_id(), focused, "滚轮不改焦点");
+    }
+
+    #[test]
+    fn the_wheel_over_nothing_moves_nothing() {
+        let (mut app, logs) = app_with_three_logs();
+        app.on_mouse(mouse(MouseEventKind::ScrollDown, 500, 500));
+        app.on_mouse(mouse(MouseEventKind::ScrollUp, 500, 500));
+        for (index, log) in logs.iter().enumerate() {
+            assert_eq!(log.borrow().scrolled, 0, "第 {} 个面板不该动", index + 1);
+        }
     }
 
     #[test]

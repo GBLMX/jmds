@@ -402,6 +402,14 @@ impl Pane for FileTree {
         self.recent
             .retain(|_, at| now.saturating_sub(*at) <= RECENT_TICKS);
     }
+    /// The wheel moves the selection, which is how this pane scrolls: a tree whose cursor is its
+    /// selection has one answer to "what happens next", and a second scrolling offset would be a
+    /// second answer.
+    fn on_scroll(&mut self, steps: isize, _height: u16) {
+        for _ in 0..steps.unsigned_abs() {
+            self.move_selection(if steps > 0 { -1 } else { 1 });
+        }
+    }
 
     fn on_file_event(&mut self, event: &FileEvent) {
         let (path, removed) = match event {

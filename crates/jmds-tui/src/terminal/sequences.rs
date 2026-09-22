@@ -95,6 +95,14 @@ const BRACKETED_PASTE_OFF: &[u8] = b"\x1b[?2004l";
 /// `CSI > 1 u` pushes kitty keyboard flag 1; `CSI < 1 u` pops it again.
 const PUSH_DISAMBIGUATE_ESCAPE_CODES: &[u8] = b"\x1b[>1u";
 const POP_KEYBOARD_ENHANCEMENT_FLAGS: &[u8] = b"\x1b[<1u";
+/// `CSI ? 1000 h` asks for button events, `CSI ? 1006 h` asks for them in SGR form.
+///
+/// Both halves are needed. Without 1000 the terminal sends nothing; without 1006 the coordinates
+/// arrive in a form that mixes them into a single byte and stops working past column 223, which is
+/// a bug that only shows up on wide screens. Motion reporting (1002) is deliberately not asked for:
+/// it would turn every mouse move into a wakeup, and nothing here does anything with a move — yet.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
 
 /// Put the terminal into the modes the UI relies on, and take them back out again.
 ///
@@ -112,6 +120,9 @@ const POP_KEYBOARD_ENHANCEMENT_FLAGS: &[u8] = b"\x1b[<1u";
 ///
 /// * `CSI ? 2004 h` — bracketed paste, so a paste arrives as one delimited block
 ///   instead of a burst of keystrokes.
+/// * `CSI ? 1000 h`, `CSI ? 1006 h` — button and wheel reports, in SGR coordinates. The mouse is
+///   an addition here, never the only way to do something: a terminal app is used by people whose
+///   hands are already on the keyboard.
 /// * `CSI > 1 u` — the kitty keyboard protocol, flag 1 (disambiguate escape codes):
 ///   "pressing the Esc key generates the byte 0x1b which also is used to indicate the
 ///   start of an escape code", which is how an `Esc` press gets read as `Alt+<key>`
@@ -122,6 +133,7 @@ const POP_KEYBOARD_ENHANCEMENT_FLAGS: &[u8] = b"\x1b[<1u";
 pub fn enable_terminal_modes<W: Write>(out: &mut W) -> io::Result<()> {
     out.write_all(BRACKETED_PASTE_ON)?;
     out.write_all(PUSH_DISAMBIGUATE_ESCAPE_CODES)?;
+    out.write_all(MOUSE_ON)?;
     out.flush()
 }
 
@@ -133,6 +145,9 @@ pub fn enable_terminal_modes<W: Write>(out: &mut W) -> io::Result<()> {
 pub fn disable_terminal_modes<W: Write>(out: &mut W) -> io::Result<()> {
     out.write_all(BRACKETED_PASTE_OFF)?;
     out.write_all(POP_KEYBOARD_ENHANCEMENT_FLAGS)?;
+    // Turning capture off matters more than turning it on: a terminal left capturing has no way to
+    // select text with the mouse, and that is a familiar complaint to have caused.
+    out.write_all(MOUSE_OFF)?;
     out.flush()
 }
 
