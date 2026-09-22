@@ -21,6 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use jmds_api::{ChatMessage, Role};
 use jmds_core::{event::AgentEvent, pane::PaneKind};
 use ratatui::layout::{Position, Rect};
 use ratatui::{
@@ -196,6 +197,43 @@ impl Chat {
         self.recall = None;
         self.refresh_menu();
         true
+    }
+
+    /// Fill the transcript with a conversation that already happened.
+    ///
+    /// A continued session starts with a history the model remembers and the human cannot see, and
+    /// a pane that only ever hears deltas would show an empty transcript next to a model answering
+    /// questions about things it was told in a conversation nobody could look at. The pane is told
+    /// the messages rather than reading the session file itself: what a session file means is the
+    /// engine's business, and a second implementation of it inside a pane is a second place for the
+    /// two to drift apart.
+    ///
+    /// Tool calls and their results are left out. What a transcript shows for a tool round is a
+    /// summary and whether it worked, and neither survives in the message: `ok` is not recorded
+    /// anywhere, and inventing one would be showing an outcome that nobody wrote down.
+    fn restore(&mut self, messages: &[ChatMessage]) {
+        for message in messages {
+            match message.role {
+                Role::User => {
+                    if let Some(content) = non_empty(&message.content) {
+                        self.entries.push(Entry::User(content.to_string()));
+                    }
+                }
+                Role::Assistant => {
+                    if let Some(reasoning) = non_empty(&message.reasoning_content) {
+                        self.entries.push(Entry::Thinking(reasoning.to_string()));
+                    }
+                    if let Some(content) = non_empty(&message.content) {
+                        self.entries.push(Entry::Assistant(content.to_string()));
+                    }
+                }
+                // The system prompt is not something the human said or read.
+                Role::System | Role::Tool => {}
+            }
+        }
+        // The view goes to the end, which is where a conversation being continued is.
+        self.follow = true;
+        self.scroll = 0;
     }
 
     /// A frame passed. Whoever owns the clock says so; nothing here polls one.
@@ -739,6 +777,7 @@ impl Pane for Chat {
                 self.close_entries();
                 self.running = true;
             }
+            AgentEvent::History(messages) => self.restore(messages),
             AgentEvent::Content(delta) => self.push_delta(false, delta),
             AgentEvent::Thinking(delta) => self.push_delta(true, delta),
             AgentEvent::ToolCall {
@@ -780,6 +819,11 @@ impl Pane for Chat {
     }
 }
 
+/// A message field worth showing: present, and not empty.
+fn non_empty(field: &Option<String>) -> Option<&str> {
+    field.as_deref().filter(|text| !text.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::Color;
@@ -809,6 +853,52 @@ mod tests {
             .as_ref()
             .map(|menu| menu.items.iter().map(|item| item.label.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_continued_session_shows_the_history_it_started_from() {
+        let mut chat = Chat::new();
+        chat.on_agent_event(&AgentEvent::History(vec![
+            ChatMessage::system("you are jmds, a coding assistant"),
+            ChatMessage::user("what is 2+2?"),
+            ChatMessage::assistant("4."),
+            ChatMessage::user("and 3+3?"),
+            ChatMessage::assistant("6."),
+        ]));
+
+        let screen = drawn_lines(&mut chat).join("\n");
+        assert!(screen.contains("what is 2+2?"), "{screen}");
+        assert!(screen.contains("4."), "{screen}");
+        // The end of the conversation is on screen, not the start: this is a conversation being
+        // continued, and the thing being continued is the latest part of it.
+        assert!(screen.contains("and 3+3?"), "{screen}");
+        assert!(screen.contains("6."), "{screen}");
+        assert!(
+            !screen.contains("you are jmds"),
+            "system prompt 不是人说过的话：{screen}"
+        );
+    }
+
+    #[test]
+    fn the_next_answer_lands_after_the_restored_history() {
+        let mut chat = Chat::new();
+        chat.on_agent_event(&AgentEvent::History(vec![
+            ChatMessage::user("first question"),
+            ChatMessage::assistant("first answer"),
+        ]));
+        // A whole turn, the way the engine sends one.
+        chat.on_agent_event(&AgentEvent::TurnStarted {
+            model: "deepseek-chat".into(),
+        });
+        chat.on_agent_event(&AgentEvent::Content("second answer".into()));
+        chat.on_agent_event(&AgentEvent::TurnFinished {
+            reason: jmds_core::event::FinishReason::Stop,
+        });
+
+        let screen = drawn_lines(&mut chat).join("\n");
+        let first = screen.find("first answer").expect("历史在屏上");
+        let second = screen.find("second answer").expect("新回答在屏上");
+        assert!(first < second, "顺序该是发生的顺序：\n{screen}");
     }
 
     #[test]

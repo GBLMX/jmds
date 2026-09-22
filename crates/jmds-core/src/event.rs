@@ -40,6 +40,12 @@ pub enum AgentEvent {
         /// One line for the transcript. Full output belongs in the pane the tool opened.
         summary: String,
     },
+    /// The conversation so far, for a session that is being continued.
+    ///
+    /// Sent once, before the first turn of a resumed session, because a pane that only ever hears
+    /// deltas would show an empty transcript while the model answered questions about things it had
+    /// been told in a conversation nobody could see.
+    History(Vec<jmds_api::ChatMessage>),
     /// Token accounting for the turn, with the cache split out: DeepSeek bills a prompt token
     /// that hit the prefix cache at a fraction of one that missed, so a single prompt number
     /// cannot be turned into a price.

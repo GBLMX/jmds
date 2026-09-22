@@ -18,7 +18,7 @@
 //!   keyboard flag) are taken back off before the alternate screen goes away, because the two
 //!   screens keep separate stacks for them.
 
-use std::{io, path::PathBuf, time::Duration};
+use std::{io, path::Path, path::PathBuf, time::Duration};
 
 use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures_util::StreamExt;
@@ -26,10 +26,10 @@ use jmds_api::{ChatMessage, Client, ClientConfig};
 use jmds_core::{
     agent::{Agent, AgentConfig},
     config::Config,
-    event::{AgentEvent, Event as BusEvent, EventBus},
+    event::{AgentEvent, Event as BusEvent, EventBus, SessionEvent},
     paths::sessions_dir,
     prompt::{Prompt, default_prompt_path},
-    session::{Header, SessionFile, new_id},
+    session::{Header, SessionFile, branch, by_id, latest_in, new_id, recover},
     tools::set::ToolSet,
 };
 use jmds_tui::{
@@ -43,19 +43,37 @@ use jmds_tui::{
 };
 use tokio::{sync::mpsc, task::JoinHandle};
 
+mod cli;
+
 /// How often a frame may be drawn while nothing is happening. Slow enough to be free, fast enough
 /// that a spinner looks like it is moving.
 const TICK: Duration = Duration::from_millis(80);
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
+
+    // Parsed before anything else: a command line that cannot be understood should say so on a
+    // terminal that still looks like a terminal.
+    let arguments: Vec<String> = std::env::args().collect();
+    let args = match cli::parse(&arguments[1..]) {
+        Ok(args) => args,
+        Err(message) => {
+            eprintln!("jmds: {message}\n\n{}", cli::USAGE);
+            std::process::exit(2);
+        }
+    };
+    if args.start == cli::Start::Help {
+        println!("{}", cli::USAGE);
+        return Ok(());
+    }
+
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(run())
+    runtime.block_on(run(args))
 }
 
-async fn run() -> color_eyre::Result<()> {
+async fn run(args: cli::Args) -> color_eyre::Result<()> {
     let config = Config::load();
     if let Err(error) = jmds_core::logger::init_logger(&config) {
         // A logger that cannot start is not a reason to refuse to run: the app's output is the
@@ -65,6 +83,24 @@ async fn run() -> color_eyre::Result<()> {
 
     let cwd = std::env::current_dir()?;
     let bus = EventBus::new(256);
+    // Resolved before the terminal is taken: a session that cannot be opened is not something to
+    // discover through a full-screen app, and a `--resume` that fell back to a new conversation
+    // would look exactly like a resume that lost its history.
+    let resolved = match resolve(
+        &args.start,
+        args.keep,
+        &cwd,
+        &sessions_dir(),
+        &config.api.model,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(message) => {
+            eprintln!("jmds: {message}");
+            std::process::exit(2);
+        }
+    };
     let theme = choose_theme(&config);
 
     // Raw mode, the alternate screen, and the panic hook that puts them back.
@@ -73,7 +109,7 @@ async fn run() -> color_eyre::Result<()> {
     // On top of that: bracketed paste, and the kitty keyboard flag that makes `Esc` unambiguous.
     let modes = enable_terminal_modes(&mut out);
 
-    let outcome = session_loop(&mut terminal, &config, theme, cwd, bus).await;
+    let outcome = session_loop(&mut terminal, &config, theme, cwd, bus, resolved).await;
 
     let _ = disable_terminal_modes(&mut out);
     ratatui::restore();
@@ -83,6 +119,110 @@ async fn run() -> color_eyre::Result<()> {
     outcome
 }
 
+/// Where a session starts: a new file, or one already on disk.
+#[derive(Debug)]
+enum Opening {
+    /// A brand new conversation, in a file of its own.
+    New,
+    /// Continuing something: the file to keep appending to, what it already said, and — for a
+    /// branch — the session it was branched off.
+    Continued {
+        path: PathBuf,
+        messages: Vec<ChatMessage>,
+        branched_from: Option<String>,
+    },
+}
+
+/// A command-line request resolved against what is on disk.
+#[derive(Debug)]
+struct Resolved {
+    opening: Opening,
+    /// Which model this conversation talks to. A continued session keeps its own: that is the model
+    /// its history came from, and swapping it mid-conversation changes what the history means.
+    model: String,
+}
+
+/// Turn a request into a session file and a history to start from.
+///
+/// Everything that can go wrong here is the caller's to say out loud: the answer is a message for
+/// the terminal, not a panic and not a silent fallback to a new conversation.
+async fn resolve(
+    request: &cli::Start,
+    keep: Option<usize>,
+    cwd: &Path,
+    sessions: &Path,
+    model: &str,
+) -> Result<Resolved, String> {
+    let summary = match request {
+        cli::Start::New | cli::Start::Help => {
+            return Ok(Resolved {
+                opening: Opening::New,
+                model: model.to_string(),
+            });
+        }
+        cli::Start::Continue => disk(latest_in(sessions, cwd).await, "读会话目录")?
+            .ok_or_else(|| format!("这个目录里还没有会话可以接着聊：{}", cwd.display()))?,
+        cli::Start::Resume(id) => {
+            disk(by_id(sessions, id).await, "读会话")?.ok_or_else(|| format!("找不到会话 {id}"))?
+        }
+        cli::Start::Branch { from, .. } => match from {
+            Some(id) => disk(by_id(sessions, id).await, "读会话")?
+                .ok_or_else(|| format!("找不到会话 {id}"))?,
+            None => disk(latest_in(sessions, cwd).await, "读会话目录")?
+                .ok_or_else(|| format!("这个目录里还没有会话可以分叉：{}", cwd.display()))?,
+        },
+    };
+
+    // The history has to be about *this* directory. Handing the model a conversation about files it
+    // cannot see is worse than starting over, because it will answer about them anyway.
+    if summary.header.cwd != cwd {
+        return Err(format!(
+            "会话 {} 是在 {} 里进行的，不是 {}——换个目录进来，或者开一个新的",
+            summary.id(),
+            summary.header.cwd.display(),
+            cwd.display()
+        ));
+    }
+
+    let (path, branched_from) = match request {
+        cli::Start::Branch { .. } => {
+            // Everything by default: a branch that quietly dropped most of the history would be a
+            // conversation with amnesia, which is the opposite of why anyone branches.
+            let id = new_id();
+            let path = disk(
+                branch(&summary.path, keep.unwrap_or(usize::MAX), &id).await,
+                "分叉会话",
+            )?;
+            (path, Some(summary.header.id.clone()))
+        }
+        _ => (summary.path.clone(), None),
+    };
+
+    let recovered = disk(recover(&path).await, "读会话内容")?;
+    if !recovered.is_complete() {
+        // A session whose tail never got written — a crash mid-turn. What is there is still worth
+        // continuing from, and saying so beats pretending the history is whole.
+        log::warn!(
+            "会话 {} 末尾有一行看不下去，它后面的内容已忽略",
+            path.display()
+        );
+    }
+
+    Ok(Resolved {
+        opening: Opening::Continued {
+            path,
+            messages: recovered.messages(),
+            branched_from,
+        },
+        model: summary.header.model.clone(),
+    })
+}
+
+/// An `io::Result` with somewhere for the failure to go: the command line's answer, not a panic.
+fn disk<T>(result: std::io::Result<T>, what: &str) -> Result<T, String> {
+    result.map_err(|error| format!("{what}失败：{error}"))
+}
+
 /// The event loop: input, the bus, and the clock.
 async fn session_loop(
     terminal: &mut ratatui::DefaultTerminal,
@@ -90,25 +230,33 @@ async fn session_loop(
     theme: Theme,
     cwd: PathBuf,
     bus: EventBus,
+    resolved: Resolved,
 ) -> color_eyre::Result<()> {
     let (prompts, questions) = mpsc::unbounded_channel::<String>();
     // Built here rather than in the task: the task outlives this borrow, so what it needs is
-    // handed over by value.
+    // handed over by value. The model is the session's, which for a continued conversation is the
+    // one its history came from rather than whatever the config says today.
+    let model = resolved.model.clone();
     let client = config.api.api_key().map(|key| {
         Client::new(ClientConfig::new(
             config.api.base_url.clone(),
-            config.api.model.clone(),
+            model.clone(),
             key,
         ))
     });
+    // Subscribed before the conversation task starts: the task announces the session the moment it
+    // has opened it — and hands over a continued session's history — and a subscriber that arrived
+    // afterwards would see neither, leaving a resumed conversation looking brand new.
+    let mut events = bus.subscribe();
     let conversation = spawn_conversation(
         bus.clone(),
         client,
-        config.api.model.clone(),
+        model,
         config.api.api_key_env.clone(),
         system_prompt(&cwd),
         sessions_dir(),
         cwd.clone(),
+        resolved.opening,
         questions,
     );
 
@@ -143,7 +291,6 @@ async fn session_loop(
 
     let mut out = io::stdout();
     let mut input = EventStream::new();
-    let mut events = bus.subscribe();
     let mut ticker = tokio::time::interval(TICK);
 
     // Watching the project, so whoever shows files hears about changes instead of polling a
@@ -238,24 +385,55 @@ fn spawn_conversation(
     system: String,
     sessions: PathBuf,
     cwd: PathBuf,
+    opening: Opening,
     mut questions: mpsc::UnboundedReceiver<String>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut messages: Vec<ChatMessage> = Vec::new();
-        let mut store =
-            match SessionFile::create(&sessions, Header::new(new_id(), model.clone(), cwd.clone()))
-                .await
-            {
-                Ok(store) => Some(store),
-                Err(error) => {
-                    // A session that cannot be written is worth saying out loud, but not worth
-                    // refusing to talk.
-                    bus.publish(AgentEvent::Error(format!(
-                        "会话文件写不了（{error}），这一轮不会留下记录"
-                    )));
-                    None
+        // Where this conversation's history lives, and whether it started here. A session that
+        // cannot be written is worth saying out loud, but not worth refusing to talk.
+        let (mut messages, mut store) = match opening {
+            Opening::New => {
+                let id = new_id();
+                let header = Header::new(id.clone(), model.clone(), cwd.clone());
+                match SessionFile::create(&sessions, header).await {
+                    Ok(store) => {
+                        bus.publish(SessionEvent::Started { id });
+                        (Vec::new(), Some(store))
+                    }
+                    Err(error) => {
+                        bus.publish(AgentEvent::Error(format!(
+                            "会话文件写不了（{error}），这一轮不会留下记录"
+                        )));
+                        (Vec::new(), None)
+                    }
                 }
-            };
+            }
+            Opening::Continued {
+                path,
+                messages,
+                branched_from,
+            } => match SessionFile::open(&path).await {
+                Ok(store) => {
+                    let id = store.header().id.clone();
+                    match branched_from {
+                        Some(from) => bus.publish(SessionEvent::Branched { from, to: id }),
+                        None => bus.publish(SessionEvent::Restored { id }),
+                    }
+                    // The history the model is about to be given, handed to whoever is watching:
+                    // otherwise a continued conversation looks brand new to the person reading it
+                    // while the model answers about things that were said in it.
+                    bus.publish(AgentEvent::History(messages.clone()));
+                    (messages, Some(store))
+                }
+                Err(error) => {
+                    // The history is still worth continuing with even if it cannot be added to.
+                    bus.publish(AgentEvent::Error(format!(
+                        "会话文件打不开（{error}），这一轮不会留下记录"
+                    )));
+                    (messages, None)
+                }
+            },
+        };
 
         let client = match client {
             Some(Ok(client)) => Some(client),
@@ -389,11 +567,13 @@ fn choose_theme(config: &Config) -> Theme {
 #[cfg(test)]
 mod tests {
     use jmds_core::{
-        event::{Event, EventBus},
+        event::{AgentEvent, Event, EventBus},
         pane::Axis,
         watch::Watcher,
     };
     use jmds_tui::{app::App, pane::files::FileTree};
+
+    use super::{Opening, cli, resolve};
 
     /// What the loop in [`session_loop`] does with one bus event, without a terminal.
     fn drawn(app: &mut App) -> String {
@@ -453,5 +633,164 @@ mod tests {
             screen.contains("delta.txt"),
             "事件到了，但文件树没显示它：\n{screen}"
         );
+    }
+
+    /// A session file for the given directory, with the given messages in it.
+    fn session_file(
+        sessions: &std::path::Path,
+        id: &str,
+        cwd: &std::path::Path,
+    ) -> std::path::PathBuf {
+        let path = sessions.join(format!("{id}.jsonl"));
+        let header = format!(
+            r#"{{"kind":"header","id":"{id}","model":"deepseek-chat","cwd":"{}","started_at_ms":1758550000000}}"#,
+            cwd.display()
+        );
+        let lines = [
+            header,
+            r#"{"kind":"message","role":"user","content":"上一次问的问题"}"#.to_string(),
+            r#"{"kind":"message","role":"assistant","content":"上一次给的回答"}"#.to_string(),
+        ];
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        path
+    }
+
+    #[tokio::test]
+    async fn a_resumed_session_hands_its_history_to_the_panes() {
+        let dir = std::env::temp_dir().join(format!("jmds-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let sessions = dir.join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        session_file(&sessions, "500-0", &dir);
+
+        let resolved = resolve(
+            &cli::Start::Resume("500-0".into()),
+            None,
+            &dir,
+            &sessions,
+            "cfg-model",
+        )
+        .await
+        .expect("这个世界里会话是有的");
+        // The session's own model, not the configured one.
+        assert_eq!(resolved.model, "deepseek-chat");
+
+        let bus = EventBus::new(64);
+        let mut events = bus.subscribe();
+        let mut app = App::new();
+        app.open(Axis::Horizontal, jmds_tui::pane::chat::Chat::new());
+        // What the conversation task publishes for a continued session.
+        let Opening::Continued { messages, .. } = &resolved.opening else {
+            panic!("该是接着聊，不是新开");
+        };
+        assert_eq!(messages.len(), 2, "两条留言都读回来了");
+        bus.publish(AgentEvent::History(messages.clone()));
+        // And what main's loop does with it.
+        while let Ok(event) = events.try_recv() {
+            if let Event::Agent(agent) = event {
+                app.on_agent_event(&agent);
+            }
+        }
+
+        let screen = drawn(&mut app);
+        // Wide characters take two cells, so the pane pads them and the screen has spaces between
+        // the characters of a Chinese line. Compared without the padding, which is a rendering
+        // detail rather than part of what was said.
+        let squeezed = screen.replace(' ', "");
+        assert!(squeezed.contains("上一次问的问题"), "{screen}");
+        assert!(squeezed.contains("上一次给的回答"), "{screen}");
+    }
+
+    #[tokio::test]
+    async fn resuming_a_session_from_another_directory_is_refused() {
+        let dir = std::env::temp_dir().join(format!("jmds-elsewhere-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        session_file(&dir, "500-0", std::path::Path::new("/somewhere/else"));
+
+        let error = resolve(&cli::Start::Resume("500-0".into()), None, &dir, &dir, "m")
+            .await
+            .expect_err("别人的项目不该接上");
+        assert!(error.contains("/somewhere/else"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn branching_keeps_the_history_and_points_at_where_it_came_from() {
+        let dir = std::env::temp_dir().join(format!("jmds-branch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        session_file(&dir, "500-0", &dir);
+
+        let resolved = resolve(
+            &cli::Start::Branch {
+                from: Some("500-0".into()),
+                keep: None,
+            },
+            None,
+            &dir,
+            &dir,
+            "m",
+        )
+        .await
+        .expect("分得动");
+        let Opening::Continued {
+            path,
+            messages,
+            branched_from,
+        } = &resolved.opening
+        else {
+            panic!("分支也是接着聊");
+        };
+        assert_eq!(branched_from.as_deref(), Some("500-0"));
+        assert_eq!(messages.len(), 2, "分叉保留全部历史");
+        assert_ne!(path, &dir.join("500-0.jsonl"), "新会话写在新文件里");
+        // And the new file says where it came from.
+        let written = std::fs::read_to_string(path).unwrap();
+        assert!(written.contains(r#""branched_from":"500-0""#), "{written}");
+    }
+
+    #[tokio::test]
+    async fn branching_can_keep_only_the_first_few_messages() {
+        let dir = std::env::temp_dir().join(format!("jmds-branch-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        session_file(&dir, "500-0", &dir);
+
+        let resolved = resolve(
+            &cli::Start::Branch {
+                from: Some("500-0".into()),
+                keep: None,
+            },
+            Some(1),
+            &dir,
+            &dir,
+            "m",
+        )
+        .await
+        .expect("分得动");
+        let Opening::Continued { messages, .. } = &resolved.opening else {
+            panic!("分支也是接着聊");
+        };
+        assert_eq!(messages.len(), 1, "只留前一条");
+    }
+
+    #[tokio::test]
+    async fn a_new_conversation_needs_nothing_on_disk() {
+        let dir = std::env::temp_dir().join(format!("jmds-fresh-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let resolved = resolve(&cli::Start::New, None, &dir, &dir, "cfg-model")
+            .await
+            .expect("新开不需要任何东西");
+        assert_eq!(resolved.model, "cfg-model", "新会话用配置里的模型");
+        assert!(matches!(resolved.opening, Opening::New));
+
+        // And asking to continue where nothing was said says so, rather than starting fresh.
+        let error = resolve(&cli::Start::Continue, None, &dir, &dir, "m")
+            .await
+            .expect_err("没得接就该说");
+        assert!(error.contains(&dir.display().to_string()), "{error}");
     }
 }

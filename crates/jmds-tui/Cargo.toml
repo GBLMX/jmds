@@ -13,6 +13,7 @@ license = "MIT"
 edtui = { version = "0.11.7", default-features = false }
 base64 = "0.23.1"
 crossterm = { workspace = true }
+jmds-api = { path = "../jmds-api" }
 jmds-core = { path = "../jmds-core" }
 log = { workspace = true }
 ratatui = { workspace = true }
