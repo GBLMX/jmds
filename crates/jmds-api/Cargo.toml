@@ -1,0 +1,15 @@
+[package]
+name = "jmds-api"
+version = "0.1.0"
+edition = "2024"
+description = "Just My DeepSeek: the DeepSeek client — streaming, usage accounting, the model's contract"
+license = "MIT"
+
+[dependencies]
+futures-util = { workspace = true }
+reqwest = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }

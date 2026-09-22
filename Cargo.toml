@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/jmds-core", "crates/jmds-tui"]
+members = ["crates/jmds-api", "crates/jmds-core", "crates/jmds-tui"]
 resolver = "3"
 
 # Versions shared by more than one crate, so the lockfile holds one of each. Members pull them
@@ -8,6 +8,7 @@ resolver = "3"
 color-eyre = "0.6.5"
 crossterm = { version = "0.29.0", features = ["event-stream"] }
 dirs = "7.0.0"
+futures-util = { version = "0.3.33", default-features = false, features = ["std"] }
 log = { version = "0.4.33", features = ["serde", "std"] }
 ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "layout-cache"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["rustls-no-provider", "stream", "json"] }
