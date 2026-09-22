@@ -793,6 +793,7 @@ version = "0.1.0"
 dependencies = [
  "color-eyre",
  "dirs",
+ "jmds-api",
  "libc",
  "log",
  "serde",

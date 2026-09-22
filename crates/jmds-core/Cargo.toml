@@ -7,6 +7,7 @@ license = "MIT"
 
 [dependencies]
 color-eyre = { workspace = true }
+jmds-api = { path = "../jmds-api" }
 dirs = { workspace = true }
 log = { workspace = true }
 serde = { workspace = true }

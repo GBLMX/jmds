@@ -1,7 +1,7 @@
 //! The four tools, and the shared rules they obey.
 //!
 //! DeepSeek is the only model here and the file system is the interface, so the tool set is small
-//! on purpose: [`bash`], [`read`], [`write`] and [`edit`] — no search tool (that is `bash`), no
+//! on purpose: [`read`], [`write`], [`edit`] and [`bash`] — no search tool (that is `bash`), no
 //! listing tool (that is `bash`), no way to ask a question of a language server.
 //!
 //! What they share lives here rather than in each of them:
@@ -13,6 +13,8 @@
 //!   those edits interleave and the last one wins.
 //! - [`bash::bash`] — the escape hatch that keeps the other three small. It is also where output is
 //!   allowed to outgrow memory: past the budget it goes to an artifact and the answer names it.
+//! - [`set::ToolSet`] — the four of them as one table, which is what the model is actually sent and
+//!   where a call by name lands.
 //!
 //! Each tool's *schema* (what the model may pass) is part of this module too, because the schema
 //! and the implementation drifting apart is the failure mode that matters: a parameter the model
@@ -22,5 +24,6 @@ pub mod bash;
 pub mod edit;
 pub mod queue;
 pub mod read;
+pub mod set;
 pub mod truncate;
 pub mod write;
