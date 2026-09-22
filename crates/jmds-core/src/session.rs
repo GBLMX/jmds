@@ -247,6 +247,117 @@ pub async fn branch(path: &Path, keep: usize, new_id: &str) -> std::io::Result<P
     Ok(target)
 }
 
+/// A session on disk: where it is, and what its header says.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Summary {
+    pub path: PathBuf,
+    pub header: Header,
+}
+
+impl Summary {
+    /// The id, which is what a person types to name this session.
+    pub fn id(&self) -> &str {
+        &self.header.id
+    }
+}
+
+/// Read a session file's header line and nothing else.
+///
+/// Cheap on purpose: choosing a session means looking at every candidate, and reading whole files to
+/// choose one would make the choice cost more than the thing chosen.
+pub async fn summary(path: &Path) -> std::io::Result<Summary> {
+    use tokio::io::AsyncBufReadExt;
+
+    let file = tokio::fs::File::open(path).await?;
+    let mut lines = tokio::io::BufReader::new(file).lines();
+    while let Some(raw) = lines.next_line().await? {
+        if raw.trim().is_empty() {
+            continue;
+        }
+        // The first line that carries anything has to be the header: a session file without one is
+        // not a session file, and guessing at the rest of it would be worse than saying so.
+        if let Ok(Line::Header(header)) = serde_json::from_str::<Line>(&raw) {
+            return Ok(Summary {
+                path: path.to_path_buf(),
+                header,
+            });
+        }
+        break;
+    }
+    Err(std::io::Error::new(
+        ErrorKind::InvalidData,
+        format!("{} is not a session file", path.display()),
+    ))
+}
+
+/// Every session file in `dir`, newest first. A directory that is not there yet is an app that has
+/// never been run, not an error.
+///
+/// Ordering is by id, which starts with the unix millisecond the session was created at: that is
+/// what "which conversation is the latest" asks, it costs no `stat`, and it does not move when an
+/// old session is reopened — reopening a conversation does not make it new.
+pub async fn list(dir: &Path) -> std::io::Result<Vec<Summary>> {
+    let mut entries = match tokio::fs::read_dir(dir).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut summaries = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // One file that is not a session — a stray `.jsonl`, a session that never got a header —
+        // is skipped rather than fatal: a bad file should not hide every good one.
+        if let Ok(summary) = summary(&path).await {
+            summaries.push(summary);
+        }
+    }
+    summaries.sort_by(|left, right| compare_ids(right.id(), left.id()));
+    Ok(summaries)
+}
+
+/// One session by id, from `dir`.
+pub async fn by_id(dir: &Path, id: &str) -> std::io::Result<Option<Summary>> {
+    match summary(&dir.join(format!("{id}.jsonl"))).await {
+        Ok(summary) => Ok(Some(summary)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// The most recent session held in `cwd`.
+///
+/// Resuming another project's conversation is worse than resuming nothing: the model would be handed
+/// a history about files it cannot see. So the working directory has to match, and sessions that do
+/// not are skipped rather than offered.
+pub async fn latest_in(dir: &Path, cwd: &Path) -> std::io::Result<Option<Summary>> {
+    Ok(list(dir)
+        .await?
+        .into_iter()
+        .find(|summary| summary.header.cwd == cwd))
+}
+
+/// Order two session ids: the millisecond they were created at, then the within-millisecond counter.
+/// An id that does not parse sorts after ones that do, by text, so a hand-made file lands at the end
+/// of the list instead of somewhere in the middle of it.
+fn compare_ids(left: &str, right: &str) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    match (parse_id(left), parse_id(right)) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (None, None) => left.cmp(right),
+    }
+}
+
+fn parse_id(id: &str) -> Option<(u64, u64)> {
+    let (millis, counter) = id.split_once('-')?;
+    Some((millis.parse().ok()?, counter.parse().ok()?))
+}
+
 /// A session id that sorts by time and cannot collide within the same millisecond.
 pub fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -271,6 +382,106 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// A session file with just its header — which is all choosing one needs.
+    async fn session(dir: &Path, id: &str, cwd: &str) -> PathBuf {
+        SessionFile::create(dir, Header::new(id, "test-model", cwd))
+            .await
+            .unwrap()
+            .path()
+            .to_path_buf()
+    }
+
+    #[tokio::test]
+    async fn a_header_is_read_without_reading_the_rest() {
+        let dir = scratch("header-only");
+        let path = dir.join("77-0.jsonl");
+        let header = serde_json::to_string(&Line::Header(Header::new("77-0", "m", "/w"))).unwrap();
+        // A half-written line after the header is exactly the state a crashed session is in.
+        std::fs::write(&path, format!("{header}\nnot json at all\n")).unwrap();
+
+        let summary = summary(&path).await.expect("一个头");
+        assert_eq!(summary.id(), "77-0");
+        assert_eq!(summary.header.cwd, PathBuf::from("/w"));
+    }
+
+    #[tokio::test]
+    async fn a_file_that_is_not_a_session_is_not_one_and_hides_nothing() {
+        let dir = scratch("not-a-session");
+        let strange = dir.join("notes.jsonl");
+        std::fs::write(&strange, "not json at all\n").unwrap();
+        assert!(summary(&strange).await.is_err());
+
+        session(&dir, "100-0", "/w").await;
+        let listed = list(&dir).await.unwrap();
+        assert_eq!(listed.len(), 1, "坏文件不该把好文件一起藏起来");
+        assert_eq!(listed[0].id(), "100-0");
+    }
+
+    #[tokio::test]
+    async fn sessions_are_listed_newest_first_within_the_same_millisecond_too() {
+        let dir = scratch("order");
+        for id in ["100-0", "200-0", "200-1", "99-9"] {
+            session(&dir, id, "/w").await;
+        }
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+
+        let ids: Vec<String> = list(&dir)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.header.id)
+            .collect();
+        assert_eq!(ids, ["200-1", "200-0", "100-0", "99-9"]);
+    }
+
+    #[tokio::test]
+    async fn a_hand_made_id_lands_at_the_end_of_the_list() {
+        let dir = scratch("weird-id");
+        session(&dir, "handmade", "/w").await;
+        session(&dir, "100-0", "/w").await;
+
+        let ids: Vec<String> = list(&dir)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|summary| summary.header.id)
+            .collect();
+        assert_eq!(ids, ["100-0", "handmade"]);
+    }
+
+    #[tokio::test]
+    async fn resuming_only_offers_this_projects_conversation() {
+        let dir = scratch("cwd");
+        session(&dir, "100-0", "/project/a").await;
+        // Newer, but about somewhere else: offered to nobody standing here.
+        session(&dir, "200-0", "/project/b").await;
+
+        let found = latest_in(&dir, Path::new("/project/a"))
+            .await
+            .unwrap()
+            .expect("a 项目的会话");
+        assert_eq!(found.id(), "100-0");
+        assert!(
+            latest_in(&dir, Path::new("/project/c"))
+                .await
+                .unwrap()
+                .is_none(),
+            "没在这个项目里聊过，就没有可接的话"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_is_found_by_id_and_a_missing_one_is_not_an_error() {
+        let dir = scratch("by-id");
+        session(&dir, "42-7", "/w").await;
+
+        assert_eq!(
+            by_id(&dir, "42-7").await.unwrap().expect("找到了").id(),
+            "42-7"
+        );
+        assert!(by_id(&dir, "nope").await.unwrap().is_none());
     }
 
     fn header(id: &str) -> Header {
