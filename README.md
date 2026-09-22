@@ -34,6 +34,21 @@ to read in an afternoon.
   the pointer, and dragging a split line resizes it. Every one of those has a key that does the same
   thing, because a terminal app is used by people whose hands are already on the keyboard.
 
+## Install
+
+The release carries a tarball per platform plus one `SHA256SUMS` covering all of them. Download the
+pair, check the tarball against the checksum, and put the binary somewhere on your `PATH`:
+
+```sh
+gh release download --repo GBLMX/jmds --pattern 'jmds-*.tar.gz' --pattern SHA256SUMS
+sha256sum -c SHA256SUMS
+tar xzf jmds-*.tar.gz
+install -m755 jmds ~/.local/bin/jmds
+```
+
+Without `gh`, the same files are on the release page. Today the matrix publishes one target,
+`x86_64-unknown-linux-gnu` — adding another is a row in `.github/workflows/release.yml`.
+
 ## Build and run
 
 ```sh
