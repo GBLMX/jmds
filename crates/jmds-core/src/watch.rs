@@ -118,11 +118,20 @@ pub struct Ignore {
 /// What is ignored unless someone says otherwise: what a build leaves behind and what version
 /// control keeps. Watching those costs a notification per compile and tells nobody anything.
 pub const DEFAULT_PATTERNS: &[&str] = &[
+    // Both the directory and its contents. A pattern ending in `/**` matches only what is *inside*:
+    // the notification for the directory itself — which is what a stream that starts near a build
+    // directory reports, and what FSEvents has instead of inotify's per-file view — would otherwise
+    // come through as a change nobody asked about.
     "**/.git/**",
+    "**/.git",
     "**/target/**",
+    "**/target",
     "**/node_modules/**",
+    "**/node_modules",
     "**/.venv/**",
+    "**/.venv",
     "**/__pycache__/**",
+    "**/__pycache__",
     // Editor leftovers: swap files, backups, and the numbered file vim leaves mid-write.
     "**/*.swp",
     "**/*.swx",
@@ -715,6 +724,24 @@ mod tests {
     /// macOS resolves `/var` to `/private/var`, Windows has short and extended-length forms. Events
     /// are translated back into the caller's terms so that "inside the root", the ignore rules, and
     /// the app's own announcements all speak the same language.
+    #[test]
+    fn a_build_directory_is_ignored_as_a_directory_and_not_merely_as_a_prefix() {
+        // The notification for a directory is not the notification for the files in it: `**/target/**`
+        // says nothing about `target` itself. macOS reports the directory when its stream is set up
+        // near one, Linux does not — which is why this was invisible until a macOS run said so.
+        let ignore = Ignore::default();
+        let root = Path::new("/work");
+        for ignored in ["target", ".git", "node_modules", ".venv", "__pycache__"] {
+            assert!(ignore.ignores(root, &root.join(ignored)), "{ignored}");
+        }
+        assert!(ignore.ignores(root, &root.join("target/debug/out")));
+
+        // A name that merely starts with one of them is a file somebody wrote.
+        for kept in ["targets.rs", ".gitignore", "node_modules.md", "venv"] {
+            assert!(!ignore.ignores(root, &root.join(kept)), "{kept}");
+        }
+    }
+
     #[test]
     fn a_root_the_os_spells_differently_is_put_back_into_the_callers_terms() {
         let root = Path::new("/var/data");
