@@ -30,9 +30,11 @@ use jmds_core::{
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
-    style::{Modifier, Style},
+    style::Style,
     widgets::{Block, Widget},
 };
+
+use crate::theme::Theme;
 
 /// The engine's rectangle for a terminal area.
 ///
@@ -78,7 +80,10 @@ pub trait Pane {
     fn title(&self) -> &str;
 
     /// Draw the contents into `area`, which excludes the border.
-    fn draw(&mut self, area: Rect, buf: &mut Buffer);
+    ///
+    /// The theme comes in rather than being held: panes change with the theme, and a pane that kept
+    /// its own copy would keep drawing the old one after a switch.
+    fn draw(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme);
 
     /// A key, when this pane has focus. The default is to ignore it: a pane with no input of its
     /// own (a log view) is a real thing, and ignoring is what lets the app's keys still work.
@@ -107,8 +112,8 @@ pub struct PaneHost {
     /// type. Mouse hit-testing reads this rather than recomputing, so a click can never land in a
     /// pane the user is not looking at.
     geometry: Vec<(PaneId, PaneRect)>,
-    focused_style: Style,
-    unfocused_style: Style,
+    /// One theme for the whole host, passed down to every pane as it is drawn.
+    theme: Theme,
 }
 
 impl Default for PaneHost {
@@ -119,15 +124,26 @@ impl Default for PaneHost {
 
 impl PaneHost {
     pub fn new() -> Self {
+        Self::with_theme(Theme::default())
+    }
+
+    /// A host drawing with `theme`.
+    pub fn with_theme(theme: Theme) -> Self {
         Self {
             tree: PaneTree::new(),
             panes: BTreeMap::new(),
             geometry: Vec::new(),
-            // Bold rather than a colour: this has to read on a terminal with eight colours and on
-            // one with none. A theme layer replaces these later, and when it does it does it here.
-            focused_style: Style::default().add_modifier(Modifier::BOLD),
-            unfocused_style: Style::default().add_modifier(Modifier::DIM),
+            theme,
         }
+    }
+
+    pub fn theme(&self) -> &Theme {
+        &self.theme
+    }
+
+    /// Switch themes. Nothing has to be told: the next frame draws in the new one.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
     }
 
     /// Open a pane, split off the focused one along `axis`.
@@ -242,19 +258,23 @@ impl PaneHost {
         let focused = self.tree.focused_id();
 
         // Taken as a list first so one pane's mutable borrow does not live across another's.
+        let styles = self.theme.styles();
         let geometry = std::mem::take(&mut self.geometry);
         for (id, rect) in &geometry {
             let Some(pane) = self.panes.get_mut(id) else {
                 continue;
             };
             let style = if Some(*id) == focused {
-                self.focused_style
+                styles.border_focused
             } else {
-                self.unfocused_style
+                styles.border
             };
             let block = Block::bordered()
+                .border_type(self.theme.glyphs.border())
                 .title(pane.title().to_string())
-                .border_style(style);
+                .title_style(style)
+                .border_style(style)
+                .style(Style::default().fg(self.theme.palette.text));
             let rect = from_pane_rect(*rect);
             block.render(rect, buf);
 
@@ -267,7 +287,7 @@ impl PaneHost {
                 height: rect.height.saturating_sub(2),
             };
             if inner.width > 0 && inner.height > 0 {
-                pane.draw(inner, buf);
+                pane.draw(inner, buf, &self.theme);
             }
         }
         self.geometry = geometry;
@@ -356,7 +376,7 @@ mod tests {
             &self.title
         }
 
-        fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+        fn draw(&mut self, area: Rect, buf: &mut Buffer, _theme: &Theme) {
             self.notes.drawn.borrow_mut().push(area);
             buf.set_string(area.x, area.y, &self.text, Style::default());
         }

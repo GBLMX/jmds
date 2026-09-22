@@ -8,6 +8,8 @@
 
 use std::path::PathBuf;
 
+use serde::{Deserialize, Serialize};
+
 use tokio::sync::broadcast;
 
 use crate::pane::{PaneId, PaneSpec};
@@ -49,7 +51,7 @@ pub enum AgentEvent {
 }
 
 /// What one turn cost, as the API reports it.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnUsage {
     pub prompt_tokens: u64,
     /// Prompt tokens served from the prefix cache.
@@ -57,6 +59,9 @@ pub struct TurnUsage {
     /// Prompt tokens that had to be processed.
     pub cache_miss_tokens: u64,
     pub completion_tokens: u64,
+    /// How much of `completion_tokens` was reasoning. Read-only, like the API's field: it is
+    /// already counted in `completion_tokens` and must not be added to it.
+    pub reasoning_tokens: u64,
 }
 
 /// Why the model stopped. `ToolCalls` is the one the app acts on: it runs them and asks again.

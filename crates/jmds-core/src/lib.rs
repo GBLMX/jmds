@@ -8,9 +8,11 @@
 //! each other, which is what keeps a PTY and a chat completion from having opinions about each
 //! other.
 
+pub mod agent;
 pub mod config;
 pub mod event;
 pub mod logger;
 pub mod pane;
 pub mod paths;
+pub mod session;
 pub mod tools;

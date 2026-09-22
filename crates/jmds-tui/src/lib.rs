@@ -6,10 +6,13 @@
 //! capability probes (colour depth, kitty keyboard protocol, synchronized output, bracketed
 //! paste, tmux), the OSC 11 background probe and the colour maths the two are built on.
 //!
-//! Rendering and input live here too: [`pane`] is the `Pane` trait and the host that lays panes
+//! Rendering and input live here too: [`effects`] is the moving part of the look (a colour ramp, a
+//! travelling highlight, a spinner), [`theme`] is what a theme names and draws with, and [`pane`] is the `Pane` trait and the host that lays panes
 //! out, draws their borders and routes keys to whichever one has focus. Both reach the engine
 //! through `jmds-core`'s event bus.
 
 pub mod app;
+pub mod effects;
 pub mod pane;
 pub mod terminal;
+pub mod theme;

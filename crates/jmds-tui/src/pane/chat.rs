@@ -25,21 +25,19 @@ use jmds_core::{event::AgentEvent, pane::PaneKind};
 use ratatui::layout::{Position, Rect};
 use ratatui::{
     buffer::Buffer,
-    style::{Modifier, Style},
+    style::Style,
     text::{Line, Span, Text},
     widgets::{Paragraph, Widget},
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{KeyOutcome, Pane};
+use crate::{effects, theme::Theme};
 
 /// How many lines of a long entry are shown before it is folded.
 const FOLD_AFTER: usize = 3;
 /// How many of those are kept when folding.
 const FOLD_KEEP: usize = 2;
-
-/// The prompt the input line starts with.
-const PROMPT: &str = "› ";
 
 /// One thing in the transcript.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +80,11 @@ pub struct Chat {
     scroll: usize,
     /// Whether the view is pinned to the newest output.
     follow: bool,
+    /// Whether a turn is in flight, which is what puts the working line on screen.
+    running: bool,
+    /// A frame counter for the working line's animation. Nothing here owns a clock: whoever does
+    /// calls [`Chat::tick`], so a frame is still a function of the state and the tick.
+    tick: u64,
     outbox: VecDeque<String>,
 }
 
@@ -104,6 +107,8 @@ impl Chat {
             recall: None,
             scroll: 0,
             follow: true,
+            running: false,
+            tick: 0,
             outbox: VecDeque::new(),
         }
     }
@@ -120,6 +125,16 @@ impl Chat {
     /// Take what the human has asked to send, oldest first.
     pub fn take_outbox(&mut self) -> Vec<String> {
         self.outbox.drain(..).collect()
+    }
+
+    /// A frame passed. Whoever owns the clock says so; nothing here polls one.
+    pub fn tick(&mut self) {
+        self.tick = self.tick.wrapping_add(1);
+    }
+
+    /// Whether a turn is in flight.
+    pub fn is_running(&self) -> bool {
+        self.running
     }
 
     /// A turn is over: the next delta starts a new entry rather than growing the last one.
@@ -238,48 +253,43 @@ impl Chat {
     /// Wrapping is done here rather than by the widget because the count of rows *is* the scroll
     /// arithmetic: measuring with one implementation and drawing with another is how a chat ends
     /// up unable to reach its own last line.
-    fn wrapped(&self, width: u16) -> Vec<Line<'static>> {
+    fn wrapped(&self, width: u16, theme: &Theme) -> Vec<Line<'static>> {
         let width = width as usize;
-        self.lines()
+        self.lines(theme)
             .into_iter()
             .flat_map(|line| wrap(line, width))
             .collect()
     }
 
     /// The transcript as lines, folded where it is long.
-    fn lines(&self) -> Vec<Line<'static>> {
+    ///
+    /// Every marker and every colour comes from the theme: a pane that hard-codes `›` or a bold
+    /// attribute is a pane that does not change when the theme does.
+    fn lines(&self, theme: &Theme) -> Vec<Line<'static>> {
+        let styles = theme.styles();
+        let glyphs = theme.glyphs;
         let mut lines = Vec::new();
+
         for entry in &self.entries {
             let (prefix, style, body): (&str, Style, String) = match entry {
-                Entry::User(text) => (
-                    "› ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                    text.clone(),
-                ),
-                Entry::Assistant(text) => ("", Style::default(), text.clone()),
-                Entry::Thinking(text) => (
-                    "· ",
-                    Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC),
-                    text.clone(),
-                ),
+                Entry::User(text) => (glyphs.prompt, styles.user, text.clone()),
+                Entry::Assistant(text) => ("", styles.assistant, text.clone()),
+                Entry::Thinking(text) => (glyphs.thinking, styles.thinking, text.clone()),
                 Entry::ToolCall { name, arguments } => (
-                    "",
-                    Style::default().add_modifier(Modifier::DIM),
-                    format!("::{name} {}", one_line(arguments)),
+                    glyphs.tool,
+                    styles.tool,
+                    format!("{name} {}", one_line(arguments)),
                 ),
                 Entry::ToolResult { name, ok, summary } => {
+                    let style = if *ok { styles.tool } else { styles.tool_failed };
                     let body = if *ok {
-                        format!(":: {name} -> {summary}")
+                        format!("{name}: {summary}")
                     } else {
-                        format!(":: {name} -> failed: {summary}")
+                        format!("{name}: failed: {summary}")
                     };
-                    ("", Style::default().add_modifier(Modifier::DIM), body)
+                    (glyphs.tool, style, body)
                 }
-                Entry::Error(text) => (
-                    "!! ",
-                    Style::default().add_modifier(Modifier::BOLD),
-                    text.clone(),
-                ),
+                Entry::Error(text) => (glyphs.failure, styles.error, text.clone()),
             };
 
             let body_lines: Vec<&str> = body.split('\n').collect();
@@ -288,7 +298,7 @@ impl Chat {
             let folded = matches!(entry, Entry::Thinking(_)) && body_lines.len() > FOLD_AFTER;
             let shown = if folded { FOLD_KEEP } else { body_lines.len() };
             for (index, line) in body_lines.iter().take(shown).enumerate() {
-                let prefix = if index == 0 { prefix } else { "  " };
+                let prefix = if index == 0 { prefix } else { "" };
                 lines.push(Line::from(vec![
                     Span::styled(prefix.to_string(), style),
                     Span::styled((*line).to_string(), style),
@@ -296,22 +306,59 @@ impl Chat {
             }
             if folded {
                 lines.push(Line::from(Span::styled(
-                    format!("  … {} more lines", body_lines.len() - shown),
-                    Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC),
+                    format!("{} {} more lines", glyphs.folded, body_lines.len() - shown),
+                    styles.dim,
                 )));
             }
         }
+
+        if self.running {
+            lines.push(self.working_line(theme));
+        }
         lines
+    }
+
+    /// What is happening right now: a spinner, and a highlight travelling along the label.
+    ///
+    /// A tool that is still running is named, because "running read" and "thinking" are different
+    /// waits and a user watching needs to know which one they are in.
+    fn working_line(&self, theme: &Theme) -> Line<'static> {
+        let styles = theme.styles();
+        let label = match self.pending_tool() {
+            Some(name) => format!("running {name}"),
+            None => "thinking".to_string(),
+        };
+        let frame = effects::spinner_frame(theme.glyphs.spinner, self.tick);
+        // A full sweep every twenty-four frames, whatever the frame rate is: the phase is a
+        // fraction of the way through, which is exactly what a frame counter can supply.
+        let phase = (self.tick % 24) as f32 / 24.0;
+
+        let mut spans = vec![Span::styled(format!("{frame} "), styles.accent)];
+        spans.extend(effects::shimmer(&label, phase, styles.dim, styles.accent));
+        Line::from(spans)
+    }
+
+    /// A tool call the model asked for that has not come back yet.
+    fn pending_tool(&self) -> Option<&str> {
+        let mut open: Option<&str> = None;
+        for entry in &self.entries {
+            match entry {
+                Entry::ToolCall { name, .. } => open = Some(name),
+                Entry::ToolResult { .. } => open = None,
+                _ => {}
+            }
+        }
+        open
     }
 
     /// The input line, and where in it the window starts.
     ///
     /// Measured in cells rather than characters: a Chinese prompt is two cells per character, and a
     /// window that counted characters would push the caret off the right edge of the row.
-    fn input_window(&self, width: u16) -> InputWindow {
+    fn input_window(&self, width: u16, prompt: &str) -> InputWindow {
         let chars: Vec<char> = self.input.chars().collect();
         let caret = self.caret.min(chars.len());
-        let available = width.saturating_sub(PROMPT.width() as u16) as usize;
+        let available = width.saturating_sub(prompt.width() as u16) as usize;
         let caret_cells: usize = chars[..caret].iter().map(|c| c.width().unwrap_or(0)).sum();
 
         let mut skipped = 0;
@@ -399,7 +446,7 @@ impl Pane for Chat {
         "chat"
     }
 
-    fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+    fn draw(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -410,7 +457,7 @@ impl Pane for Chat {
         let transcript = Rect::new(area.x, area.y, area.width, area.height - 1);
 
         // Wrapped once, by this pane, so the row count used for scrolling is the row count drawn.
-        let rows = self.wrapped(transcript.width);
+        let rows = self.wrapped(transcript.width, theme);
         let bottom = rows.len().saturating_sub(transcript.height as usize);
 
         // The clamp lives here because only a draw knows the width the wrapping used, and reaching
@@ -422,21 +469,20 @@ impl Pane for Chat {
         };
         self.follow = self.scroll >= bottom;
 
+        let styles = theme.styles();
         let visible: Vec<Line<'static>> = rows.into_iter().skip(self.scroll).collect();
-        Paragraph::new(Text::from(visible)).render(transcript, buf);
+        Paragraph::new(Text::from(visible))
+            .style(styles.text)
+            .render(transcript, buf);
 
+        let prompt = theme.glyphs.prompt;
+        buf.set_string(area.x, input_row.y, prompt, styles.prompt);
+        let window = self.input_window(area.width, prompt);
         buf.set_string(
-            area.x,
-            input_row.y,
-            PROMPT,
-            Style::default().add_modifier(Modifier::BOLD),
-        );
-        let window = self.input_window(area.width);
-        buf.set_string(
-            area.x + PROMPT.width() as u16,
+            area.x + prompt.width() as u16,
             input_row.y,
             &window.text,
-            Style::default(),
+            styles.text,
         );
     }
 
@@ -444,8 +490,11 @@ impl Pane for Chat {
         if area.height == 0 {
             return None;
         }
-        let window = self.input_window(area.width);
-        let column = area.x + PROMPT.width() as u16 + window.caret_cells;
+        // The caret is placed from the theme's prompt too: a glyph that is two cells wide would
+        // otherwise put the cursor a cell off from the text.
+        let prompt = crate::theme::Theme::default().glyphs.prompt;
+        let window = self.input_window(area.width, prompt);
+        let column = area.x + prompt.width() as u16 + window.caret_cells;
         Some(Position::new(
             column.min(area.right().saturating_sub(1)),
             area.y + area.height - 1,
@@ -499,7 +548,10 @@ impl Pane for Chat {
 
     fn on_agent_event(&mut self, event: &AgentEvent) {
         match event {
-            AgentEvent::TurnStarted { .. } => self.close_entries(),
+            AgentEvent::TurnStarted { .. } => {
+                self.close_entries();
+                self.running = true;
+            }
             AgentEvent::Content(delta) => self.push_delta(false, delta),
             AgentEvent::Thinking(delta) => self.push_delta(true, delta),
             AgentEvent::ToolCall {
@@ -527,9 +579,13 @@ impl Pane for Chat {
                     summary: summary.clone(),
                 });
             }
-            AgentEvent::TurnFinished { .. } => self.close_entries(),
+            AgentEvent::TurnFinished { .. } => {
+                self.close_entries();
+                self.running = false;
+            }
             AgentEvent::Error(text) => {
                 self.close_entries();
+                self.running = false;
                 self.entries.push(Entry::Error(text.clone()));
             }
             AgentEvent::Usage(_) => {}
@@ -572,7 +628,7 @@ mod tests {
 
     fn drawn_lines(chat: &mut Chat) -> Vec<String> {
         let mut buf = Buffer::empty(area());
-        chat.draw(area(), &mut buf);
+        chat.draw(area(), &mut buf, &Theme::default());
         screen(&buf).lines().map(str::to_string).collect()
     }
 
@@ -726,7 +782,7 @@ mod tests {
             screen.contains("::read { \"path\": \"src/main.rs\" }"),
             "{screen}"
         );
-        assert!(screen.contains(":: read -> 42 lines"), "{screen}");
+        assert!(screen.contains("::read: 42 lines"), "{screen}");
     }
 
     #[test]
@@ -797,7 +853,7 @@ mod tests {
         let mut chat = Chat::new();
         typed(&mut chat, &"x".repeat(60));
         let mut buf = Buffer::empty(area());
-        chat.draw(area(), &mut buf);
+        chat.draw(area(), &mut buf, &Theme::default());
         let last = screen(&buf).lines().last().unwrap().to_string();
         assert!(last.starts_with("› "), "{last}");
         assert!(last.trim_end().ends_with('x'), "{last}");

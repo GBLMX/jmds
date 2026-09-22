@@ -18,7 +18,8 @@ pub mod usage;
 
 pub use client::{ApiError, Client, ClientConfig, ToolSpec};
 pub use message::{
-    ChatMessage, Role, ToolCall, enforce_reasoning_replay, requires_reasoning_replay,
+    ChatMessage, Role, ToolCall, ToolCallFunction, enforce_reasoning_replay,
+    requires_reasoning_replay,
 };
 pub use stream::{FinishReason, SseBuffer, StreamEvent, parse_delta};
 pub use usage::Usage;

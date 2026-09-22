@@ -195,7 +195,7 @@ mod tests {
             "recorder"
         }
 
-        fn draw(&mut self, _area: Rect, _buf: &mut Buffer) {}
+        fn draw(&mut self, _area: Rect, _buf: &mut Buffer, _theme: &crate::theme::Theme) {}
 
         fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
             self.keys.borrow_mut().push(key.code);

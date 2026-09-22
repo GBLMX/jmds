@@ -28,6 +28,12 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Where sessions are kept. Under the config directory rather than the cache: a session is the
+/// user's own history, and clearing a cache must not clear it.
+pub fn sessions_dir() -> PathBuf {
+    config_dir().join("sessions")
+}
+
 /// Where a tool puts output too long to hand back inline.
 ///
 /// Under the cache rather than the config: an artifact is reproducible output, not something the
@@ -63,7 +69,13 @@ mod tests {
     fn every_path_is_named_after_the_app() {
         // The failure this guards against is a rename that misses one of them: two directories
         // under two names is how a config file "disappears" after an upgrade.
-        for path in [config_dir(), cache_dir(), config_file(), artifacts_dir()] {
+        for path in [
+            config_dir(),
+            cache_dir(),
+            config_file(),
+            artifacts_dir(),
+            sessions_dir(),
+        ] {
             assert!(
                 path.components().any(|c| c.as_os_str() == APP),
                 "{} is not under {APP}",

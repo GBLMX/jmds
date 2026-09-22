@@ -77,7 +77,7 @@ pub(crate) fn palette_rgb(index: u8) -> (u8, u8, u8) {
 /// being classified as a dark one. The sixteen names are the ANSI colors they stand for.
 /// `Reset` is whatever the terminal already had on screen, so it has no answer of its own; the
 /// caller's fallback is then the same assumption [`Background::default`] makes.
-pub(crate) fn color_luminance(color: Color) -> Option<f64> {
+pub fn color_luminance(color: Color) -> Option<f64> {
     let (r, g, b) = match color {
         Color::Rgb(r, g, b) => (r, g, b),
         Color::Indexed(index) => palette_rgb(index),
@@ -131,7 +131,7 @@ pub(crate) fn rgb_luminance(r: f64, g: f64, b: f64) -> f64 {
 }
 
 /// What a luminance says about the background.
-pub(crate) fn background_from_luminance(luminance: f64) -> Background {
+pub fn background_from_luminance(luminance: f64) -> Background {
     if luminance > 0.5 {
         Background::Light
     } else {
