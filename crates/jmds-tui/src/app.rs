@@ -311,8 +311,7 @@ impl App {
     /// focus, because a command's output belongs with the other commands.
     pub fn on_pane_event(&mut self, event: &jmds_core::event::PaneEvent) {
         self.dirty = true;
-        use jmds_core::event::PaneEvent;
-        use jmds_core::pane::PaneKind;
+        use jmds_core::{event::PaneEvent, pane::PaneKind};
 
         match event {
             PaneEvent::Opened { spec } => {
@@ -772,8 +771,10 @@ mod tests {
 
     #[test]
     fn a_terminal_asked_for_by_the_engine_appears_beside_the_shell() {
-        use jmds_core::event::PaneEvent;
-        use jmds_core::pane::{PaneId, PaneSpec};
+        use jmds_core::{
+            event::PaneEvent,
+            pane::{PaneId, PaneSpec},
+        };
 
         let mut app = App::new();
         let shell = PaneId::fresh();
@@ -810,8 +811,7 @@ mod tests {
 
     #[test]
     fn closing_a_terminal_pane_tells_the_engine_to_stop_its_command() {
-        use jmds_core::event::PtyEvent;
-        use jmds_core::pane::PaneId;
+        use jmds_core::{event::PtyEvent, pane::PaneId};
 
         let mut app = App::new();
         let shell = PaneId::fresh();

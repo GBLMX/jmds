@@ -14,11 +14,15 @@
 use std::collections::VecDeque;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use jmds_core::event::PtyEvent;
-use jmds_core::pane::{PaneId, PaneKind};
-use ratatui::buffer::Buffer;
-use ratatui::layout::{Position, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use jmds_core::{
+    event::PtyEvent,
+    pane::{PaneId, PaneKind},
+};
+use ratatui::{
+    buffer::Buffer,
+    layout::{Position, Rect},
+    style::{Color, Modifier, Style},
+};
 
 use super::{KeyOutcome, Pane};
 use crate::theme::Theme;

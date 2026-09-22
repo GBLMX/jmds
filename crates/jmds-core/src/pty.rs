@@ -14,10 +14,14 @@
 //! - **结束是事件，不是错误。** 子进程一死，主端读到的就是 `EIO`。那不是异常，是这一会话的最后
 //!   一句话，所以它变成一次 [`PtyEvent::Exited`]，然后读线程收工。
 
-use std::io::{self, Read, Write};
-use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::{
+    io::{self, Read, Write},
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 use parking_lot::Mutex;
 #[cfg(not(unix))]
@@ -25,8 +29,10 @@ use portable_pty::ChildKiller;
 use portable_pty::{Child, CommandBuilder, MasterPty, PtyPair, PtySize, native_pty_system};
 use tokio::sync::broadcast;
 
-use crate::event::{Event, EventBus, PtyEvent};
-use crate::pane::PaneId;
+use crate::{
+    event::{Event, EventBus, PtyEvent},
+    pane::PaneId,
+};
 
 /// 一次从主端读多少。pty 没有行结构，读到多少就发多少，所以不必攒着。
 const READ_CHUNK: usize = 8192;
@@ -298,8 +304,10 @@ fn io_error(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
+    };
 
     /// 本文件里所有等待的上限。pty 事件是另一个线程发的，测试只能等，不能赌。
     const PATIENCE: Duration = Duration::from_secs(5);

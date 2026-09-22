@@ -23,9 +23,10 @@ use std::collections::{HashMap, VecDeque};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jmds_api::{ChatMessage, Role};
 use jmds_core::{event::AgentEvent, pane::PaneKind};
-use ratatui::layout::{Position, Rect};
+
 use ratatui::{
     buffer::Buffer,
+    layout::{Position, Rect},
     style::Style,
     text::{Line, Span, Text},
     widgets::{Paragraph, Widget},

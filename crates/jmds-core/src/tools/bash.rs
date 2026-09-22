@@ -38,8 +38,10 @@ use serde::{Deserialize, Serialize};
 use tokio::{io::AsyncReadExt, process::Command, sync::oneshot};
 
 use super::truncate::{self, MAX_BYTES, MAX_COLUMN, MAX_LINES};
-use crate::event::{EventBus, PtyEvent};
-use crate::pane::PaneId;
+use crate::{
+    event::{EventBus, PtyEvent},
+    pane::PaneId,
+};
 
 /// Seconds a command may run when the model does not say.
 pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
@@ -285,7 +287,8 @@ pub async fn bash(
     });
     let mut stop = watch.map(|watch| watch.stop);
 
-    let mut child = Command::new("bash")
+    let mut command_line = Command::new("bash");
+    command_line
         .arg("-c")
         .arg(&command)
         .current_dir(&cwd)
@@ -293,9 +296,13 @@ pub async fn bash(
         // call would sit there until its timeout.
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        // 自己一组：超时也好、被人叫停也好，`kill_group` 打的是这一组，命令起的那些也跟着走。
-        .process_group(0)
+        .stderr(Stdio::piped());
+    // 自己一组：超时也好、被人叫停也好，`kill_group` 打的是这一组，命令起的那些也跟着走。
+    // Windows 没有进程组，那里只能杀命令本身，它起的东西归它自己管 —— 这是这一处 API 的差别，
+    // 不是行为上的取舍。
+    #[cfg(unix)]
+    command_line.process_group(0);
+    let mut child = command_line
         .spawn()
         .map_err(|error| BashError::Spawn(error.to_string()))?;
 

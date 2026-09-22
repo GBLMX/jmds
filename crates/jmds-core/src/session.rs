@@ -15,8 +15,10 @@
 //! as long as the disk takes, which is exactly the sort of stall that turns into a stutter in the
 //! terminal — and the loop that writes these lines is async already.
 
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
+use std::{
+    io::ErrorKind,
+    path::{Path, PathBuf},
+};
 
 use jmds_api::ChatMessage;
 use serde::{Deserialize, Serialize};

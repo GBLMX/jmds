@@ -18,7 +18,11 @@
 //!   keyboard flag) are taken back off before the alternate screen goes away, because the two
 //!   screens keep separate stacks for them.
 
-use std::{io, path::Path, path::PathBuf, time::Duration};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use crossterm::event::{Event as TermEvent, EventStream, KeyEventKind};
 use futures_util::StreamExt;
@@ -422,7 +426,6 @@ async fn session_loop(
 ///
 /// Everything it needs is passed by value. It outlives the loop that starts it, so it cannot borrow
 /// the configuration the loop was reading.
-#[allow(clippy::too_many_arguments)]
 /// What the loop asks the conversation task to do.
 ///
 /// One channel rather than two, because these are the same kind of thing: something only the one owner
@@ -434,6 +437,7 @@ enum Work {
     Resume(String),
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_conversation(
     bus: EventBus,
     client: Option<Result<Client, jmds_api::ApiError>>,
@@ -748,12 +752,23 @@ mod tests {
         app.open(Axis::Horizontal, FileTree::new(dir.clone()));
         let mut events = bus.subscribe();
 
-        std::fs::write(dir.join("delta.txt"), "written from outside\n").unwrap();
+        // Written again if nothing arrives: a filesystem watcher takes a moment to become live, and on
+        // macOS the stream reports changes from when it was established rather than from when the watch
+        // was asked for. A test about the chain should not be a test about that race.
+        let write = || {
+            std::fs::write(dir.join("delta.txt"), "written from outside\n").unwrap();
+        };
+        write();
 
         // Wait for whatever the watcher publishes, then hand it to the app exactly as the loop does.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         let mut handed = 0;
+        let mut last_write = std::time::Instant::now();
         while std::time::Instant::now() < deadline {
+            if handed == 0 && last_write.elapsed() > std::time::Duration::from_millis(150) {
+                write();
+                last_write = std::time::Instant::now();
+            }
             match events.try_recv() {
                 Ok(Event::File(file)) => {
                     app.on_file_event(&file);
@@ -838,8 +853,7 @@ mod tests {
     /// chain is what can be wired wrong while every link passes.
     #[tokio::test]
     async fn a_bash_call_shows_in_a_pane_and_a_ctrl_c_there_stops_it() {
-        use jmds_core::event::PaneEvent;
-        use jmds_core::tools::set::ToolSet;
+        use jmds_core::{event::PaneEvent, tools::set::ToolSet};
 
         let bus = EventBus::new(256);
         let mut app = App::new();

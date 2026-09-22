@@ -32,8 +32,10 @@ use serde::de::DeserializeOwned;
 use tokio::sync::{broadcast, oneshot};
 
 use super::{bash, edit, queue::FileMutex, read, write};
-use crate::event::{Event, EventBus, FileEvent, PaneEvent, PtyEvent};
-use crate::pane::{PaneId, PaneKind, PaneSpec};
+use crate::{
+    event::{Event, EventBus, FileEvent, PaneEvent, PtyEvent},
+    pane::{PaneId, PaneKind, PaneSpec},
+};
 
 /// 同时留几个 `bash` 面板。
 ///

@@ -230,10 +230,10 @@ impl FileTree {
     /// The folder that holds the path is the only one that can have changed rows because of it. If
     /// that folder is not on screen, this is a no-op — and reads nothing.
     fn touch(&mut self, path: &Path) {
-        if let Some(parent) = path.parent() {
-            if parent.starts_with(&self.root) {
-                self.splice(parent);
-            }
+        if let Some(parent) = path.parent()
+            && parent.starts_with(&self.root)
+        {
+            self.splice(parent);
         }
     }
 

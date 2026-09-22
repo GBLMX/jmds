@@ -12,8 +12,10 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::complete::{Item, Prefix, Source};
-use crate::theme::Theme;
+use crate::{
+    complete::{Item, Prefix, Source},
+    theme::Theme,
+};
 
 /// One command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

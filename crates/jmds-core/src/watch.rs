@@ -13,10 +13,12 @@
 //! notification. Publishing them one by one would make a pane that reloads on change reload three
 //! times per save.
 
-use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
-use std::time::Duration;
+use std::{
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::mpsc::{Receiver, RecvTimeoutError, Sender},
+    time::Duration,
+};
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use notify::event::{ModifyKind, RenameMode};
