@@ -1,7 +1,7 @@
 //! The commands the input line understands, and where completion candidates come from.
 //!
-//! A command is a line that starts with `/`: six of them, each with the one line of explanation the
-//! menu shows. That is the whole vocabulary, and it is deliberately small — a command list is prompt
+//! A command is a line that starts with `/`: each one with the single line of explanation the menu
+//! shows. That is the whole vocabulary, and it is deliberately small — a command list is prompt
 //! surface, and every entry is something the reader has to skip past when they are looking for the
 //! one they want.
 //!
@@ -42,6 +42,18 @@ pub const COMMANDS: &[Command] = &[
         name: "clear",
         usage: "/clear",
         description: "empty the transcript, keeping the session file",
+        takes_argument: false,
+    },
+    Command {
+        name: "model",
+        usage: "/model [<name>]",
+        description: "which model answers; alone, say which one and what else there is",
+        takes_argument: true,
+    },
+    Command {
+        name: "key",
+        usage: "/key",
+        description: "where the API key is read from, and whether it is set",
         takes_argument: false,
     },
     Command {
@@ -194,6 +206,12 @@ impl Source for SessionSource {
     /// `/glyphs un` are completed by the same mechanism that completes `/th`.
     fn argument(&self, command: &str, query: &str) -> Vec<Item> {
         let values: Vec<String> = match command {
+            // The models a person is choosing between. Any other name still works — this is what the
+            // menu can offer, not what the service accepts.
+            "model" => jmds_core::config::KNOWN_MODELS
+                .iter()
+                .map(|name| name.to_string())
+                .collect(),
             "theme" => Theme::NAMES.iter().map(|name| name.to_string()).collect(),
             "glyphs" => ["unicode", "ascii"]
                 .iter()

@@ -29,10 +29,10 @@ use futures_util::StreamExt;
 use jmds_api::{ChatMessage, Client, ClientConfig};
 use jmds_core::{
     agent::{Agent, AgentConfig},
-    config::Config,
+    config::{ApiConfig, Config, KNOWN_MODELS},
     event::{AgentEvent, Event as BusEvent, EventBus, SessionEvent},
     pane::{Axis, PaneId},
-    paths::sessions_dir,
+    paths::{config_file, sessions_dir},
     prompt::{Prompt, default_prompt_path},
     pty::Run,
     session::{Header, SessionFile, branch, by_id, latest_in, new_id, recover},
@@ -248,22 +248,18 @@ async fn session_loop(
     // handed over by value. The model is the session's, which for a continued conversation is the
     // one its history came from rather than whatever the config says today.
     let model = resolved.model.clone();
-    let client = config.api.api_key().map(|key| {
-        Client::new(ClientConfig::new(
-            config.api.base_url.clone(),
-            model.clone(),
-            key,
-        ))
-    });
+    // What `/model` reports and switches. The conversation task holds the real one — this is the
+    // loop's copy, so that a command can answer without asking the task and waiting a round trip.
+    let mut current_model = model.clone();
     // Subscribed before the conversation task starts: the task announces the session the moment it
     // has opened it — and hands over a continued session's history — and a subscriber that arrived
     // afterwards would see neither, leaving a resumed conversation looking brand new.
     let mut events = bus.subscribe();
     let conversation = spawn_conversation(
         bus.clone(),
-        client,
+        config.api.clone(),
+        config.api.api_key(),
         model,
-        config.api.api_key_env.clone(),
         system_prompt(&cwd),
         sessions_dir(),
         cwd.clone(),
@@ -363,6 +359,61 @@ async fn session_loop(
                             Some(jmds_tui::app::CommandOutcome::Resume(id)) => {
                                 let _ = prompts.send(Work::Resume(id));
                             }
+                            Some(jmds_tui::app::CommandOutcome::Model(name)) => {
+                                match name {
+                                    // `Some` is not the same as `known`: any name the service takes
+                                    // is a model, and refusing one this build has not heard of would
+                                    // age badly. It is said out loud instead of checked.
+                                    Some(name) => {
+                                        let file = config_file();
+                                        let wrote = Config::set_setting(&file, "api", "model", &name);
+                                        let mut said = format!(
+                                            "模型：{current_model} → {name}（下一条消息起）"
+                                        );
+                                        match wrote {
+                                            Ok(()) => said.push_str(&format!(
+                                                "；已记进 {}，新会话就用它",
+                                                file.display()
+                                            )),
+                                            Err(error) => said.push_str(&format!(
+                                                "；只是没能写进 {}：{error}",
+                                                file.display()
+                                            )),
+                                        }
+                                        if !KNOWN_MODELS.contains(&name.as_str()) {
+                                            said.push_str(&format!(
+                                                "\n“{name}”不在已知的 {} 里 —— 会原样发给服务端。",
+                                                KNOWN_MODELS.join("、")
+                                            ));
+                                        }
+                                        current_model = name.clone();
+                                        let _ = prompts.send(Work::SetModel(name));
+                                        app.host_mut().note(&said);
+                                    }
+                                    None => {
+                                        let said = model_note(&current_model);
+                                        app.host_mut().note(&said);
+                                    }
+                                }
+                            }
+                            Some(jmds_tui::app::CommandOutcome::Key) => {
+                                let said = key_report(&config);
+                                app.host_mut().note(&said);
+                            }
+                            Some(jmds_tui::app::CommandOutcome::Keep { table, key, value }) => {
+                                let file = config_file();
+                                let said = match Config::set_setting(&file, table, key, &value) {
+                                    Ok(()) => format!(
+                                        "{table}.{key} = {value}（已写进 {}，下次开也是它）",
+                                        file.display()
+                                    ),
+                                    Err(error) => format!(
+                                        "{table}.{key} = {value}（只是没能写进 {}：{error}）",
+                                        file.display()
+                                    ),
+                                };
+                                app.host_mut().note(&said);
+                            }
                             Some(jmds_tui::app::CommandOutcome::Handled) => {}
                             None => {
                                 let _ = prompts.send(Work::Ask(line));
@@ -435,14 +486,16 @@ enum Work {
     Ask(String),
     /// Continue a different session, held in this directory.
     Resume(String),
+    /// Answer with a different model from the next turn on.
+    SetModel(String),
 }
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_conversation(
     bus: EventBus,
-    client: Option<Result<Client, jmds_api::ApiError>>,
-    model: String,
-    key_env: String,
+    api: ApiConfig,
+    key: Option<String>,
+    mut model: String,
     system: String,
     sessions: PathBuf,
     cwd: PathBuf,
@@ -496,14 +549,23 @@ fn spawn_conversation(
             },
         };
 
-        let client = match client {
+        // Built here rather than by the caller: a switch of model rebuilds it, and a client is made
+        // of exactly the three things this task was handed.
+        let build = |model: &str| {
+            key.as_ref()
+                .map(|key| Client::new(ClientConfig::new(api.base_url.clone(), model, key.clone())))
+        };
+        let client = match build(&model) {
             Some(Ok(client)) => Some(client),
             Some(Err(error)) => {
                 bus.publish(AgentEvent::Error(format!("客户端建不起来: {error}")));
                 None
             }
             None => {
-                log::warn!("没有 API key：把 {key_env} 设好之后才有回答");
+                log::warn!(
+                    "没有 API key：把 {} 设好之后才有回答（`/key` 会说清在哪设）",
+                    api.api_key_env
+                );
                 None
             }
         };
@@ -516,25 +578,35 @@ fn spawn_conversation(
                 // Switching sessions needs no client: it is a file and a history, not a request. The key
                 // decides whether questions can be *answered*, and someone without one may well want to
                 // read what was said last time.
-                if let Work::Resume(id) = work {
-                    resume_into(&id, &sessions, &cwd, &mut messages, &mut store, &bus).await;
-                    continue;
+                match work {
+                    Work::Resume(id) => {
+                        resume_into(&id, &sessions, &cwd, &mut messages, &mut store, &bus).await;
+                        continue;
+                    }
+                    // What a model decides is what the next request would be sent with, and there is
+                    // no client to send one; what it changes here is which model the panes report.
+                    Work::SetModel(name) => {
+                        model = name;
+                        continue;
+                    }
+                    Work::Ask(_) => {}
                 }
                 bus.publish(AgentEvent::TurnStarted {
                     model: model.clone(),
                 });
                 bus.publish(AgentEvent::Error(format!(
-                    "没有可用的 DeepSeek 客户端：把 key 放进 {key_env} 再启动"
+                    "没有可用的 DeepSeek 客户端：把 key 放进 {} 再启动（`/key` 会说清在哪设）",
+                    api.api_key_env
                 )));
             }
             return;
         };
 
-        let agent = Agent::new(
+        let mut agent = Agent::new(
             client,
             ToolSet::new(&cwd).with_bus(bus.clone()),
             bus.clone(),
-            AgentConfig::new(model.clone(), system),
+            AgentConfig::new(model.clone(), system.clone()),
         );
 
         while let Some(work) = work.recv().await {
@@ -544,6 +616,30 @@ fn spawn_conversation(
                 // so nothing is in flight while the history is being replaced.
                 Work::Resume(id) => {
                     resume_into(&id, &sessions, &cwd, &mut messages, &mut store, &bus).await;
+                    continue;
+                }
+                // Rebuilt rather than mutated: the model is both what a request is sent with and the
+                // name the reasoning-replay rule is looked up under, and the two must not be able to
+                // disagree about which model answered.
+                Work::SetModel(name) => {
+                    match build(&name) {
+                        Some(Ok(client)) => {
+                            model = name;
+                            agent = Agent::new(
+                                client,
+                                ToolSet::new(&cwd).with_bus(bus.clone()),
+                                bus.clone(),
+                                AgentConfig::new(model.clone(), system.clone()),
+                            );
+                        }
+                        Some(Err(error)) => {
+                            bus.publish(AgentEvent::Error(format!("换不了模型：{error}")));
+                        }
+                        None => bus.publish(AgentEvent::Error(format!(
+                            "换不了模型：没有可用的 key（把 {} 设好）",
+                            api.api_key_env
+                        ))),
+                    }
                     continue;
                 }
             };
@@ -674,6 +770,46 @@ async fn switch_session(
     Ok(())
 }
 
+/// What `/model` alone says: which model this conversation is on, and what else there is.
+///
+/// The list is the one the menu offers ([`KNOWN_MODELS`]) and the file is where a *new* session's
+/// default comes from — which is the half nobody guesses, because a continued session keeps the
+/// model its history came from and changing the file does nothing to it.
+fn model_note(current: &str) -> String {
+    format!(
+        "模型：{current}\n换一个：/model <name>（也会写进 {}，新会话就用它）\n已知：{}",
+        config_file().display(),
+        KNOWN_MODELS.join("、")
+    )
+}
+
+/// Where the key comes from, and whether this process can see one.
+///
+/// The key itself is never read out and never written anywhere: this app has no place to put one. What
+/// it has is the *name* of a variable, and the two things a person needs to be told — the exact line
+/// that sets it, and the field that changes which variable is read.
+fn key_report(config: &Config) -> String {
+    key_report_with(config, |name| std::env::var(name).ok())
+}
+
+/// [`key_report`] with the environment as a parameter, so a test can ask what it would say.
+fn key_report_with(config: &Config, lookup: impl FnOnce(&str) -> Option<String>) -> String {
+    let name = config.api.api_key_env.clone();
+    let set = config.api.api_key_with(lookup).is_some();
+    format!(
+        "key 从环境变量 {name} 读（配置文件里存的是这个变量名，不是 key）\n\
+         现在：{}\n\
+         给它一个值：export {name}=sk-…（写进 ~/.zshrc 之类，然后重开 jmds）\n\
+         要换变量名：{} 里的 [api] api_key_env",
+        if set {
+            "读到了 ✓"
+        } else {
+            "没读到 ✗（问模型会得到一句同样的解释）"
+        },
+        config_file().display()
+    )
+}
+
 /// What the model is told about itself and where it is.
 ///
 /// Short on purpose: what each tool is *for* is in the tool table, which the model is sent anyway,
@@ -717,7 +853,10 @@ mod tests {
     };
     use jmds_tui::{app::App, pane::files::FileTree};
 
-    use super::{Opening, Work, cli, resolve, spawn_conversation, switch_session};
+    use super::{
+        ApiConfig, Config, Opening, Work, cli, key_report_with, resolve, spawn_conversation,
+        switch_session,
+    };
     use crate::PaneId;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use jmds_core::pty::Run;
@@ -962,9 +1101,9 @@ mod tests {
         let (prompts, work) = tokio::sync::mpsc::unbounded_channel();
         let conversation = spawn_conversation(
             bus.clone(),
+            ApiConfig::default(),
             None,
             "deepseek-chat".to_string(),
-            "DEEPSEEK_API_KEY".to_string(),
             "system".to_string(),
             dir.clone(),
             dir.clone(),
@@ -1165,6 +1304,71 @@ mod tests {
             panic!("分支也是接着聊");
         };
         assert_eq!(messages.len(), 1, "只留前一条");
+    }
+
+    #[tokio::test]
+    async fn a_model_switch_is_what_the_next_turn_reports() {
+        // Without a key the loop still answers every question — with an explanation — and what a
+        // switch changes is which model it reports. That is the half of `/model` a person sees; the
+        // other half is the file, and in between the engine is told.
+        let dir = std::env::temp_dir().join(format!("jmds-set-model-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let bus = EventBus::new(64);
+        let mut events = bus.subscribe();
+        let (prompts, work) = tokio::sync::mpsc::unbounded_channel();
+        let conversation = spawn_conversation(
+            bus.clone(),
+            ApiConfig::default(),
+            None,
+            "deepseek-chat".to_string(),
+            "system".to_string(),
+            dir.clone(),
+            dir.clone(),
+            Opening::New,
+            work,
+        );
+        prompts
+            .send(Work::SetModel("deepseek-reasoner".into()))
+            .expect("任务还在");
+        prompts.send(Work::Ask("问一句".into())).expect("任务还在");
+
+        let mut reported = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && reported.is_empty() {
+            match events.try_recv() {
+                Ok(Event::Agent(AgentEvent::TurnStarted { model })) => reported.push(model),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+        assert_eq!(
+            reported,
+            vec!["deepseek-reasoner".to_string()],
+            "换过之后报的就是新模型"
+        );
+        conversation.abort();
+    }
+
+    #[test]
+    fn the_key_report_names_the_variable_and_says_whether_it_is_there() {
+        let mut config = Config::default();
+        config.api.api_key_env = "JMDS_TEST_KEY".into();
+
+        let missing = key_report_with(&config, |_| None);
+        assert!(missing.contains("JMDS_TEST_KEY"), "{missing}");
+        assert!(missing.contains("没读到"), "{missing}");
+        // Spelled out, not hinted at: someone asking where the key goes is owed the line itself.
+        assert!(missing.contains("export JMDS_TEST_KEY=sk-"), "{missing}");
+        assert!(missing.contains("config.toml"), "{missing}");
+
+        let there = key_report_with(&config, |_| Some("sk-secret".into()));
+        assert!(there.contains("读到了"), "{there}");
+        assert!(
+            !there.contains("sk-secret"),
+            "报告不该把 key 念出来：{there}"
+        );
     }
 
     #[tokio::test]

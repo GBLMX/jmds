@@ -450,7 +450,7 @@ impl App {
             "quit" => return Some(CommandOutcome::Quit),
             "help" => self.host.note(HELP),
             "clear" => self.host.clear(),
-            "theme" => self.set_theme(argument),
+            "theme" => return Some(self.set_theme(argument).unwrap_or(CommandOutcome::Handled)),
             "prompt" => self.load_prompt(argument),
             "resume" => {
                 if argument.is_empty() {
@@ -459,44 +459,80 @@ impl App {
                     return Some(CommandOutcome::Resume(argument.to_string()));
                 }
             }
-            "glyphs" => self.set_glyphs(argument),
+            "glyphs" => return Some(self.set_glyphs(argument).unwrap_or(CommandOutcome::Handled)),
+            // Both of these belong to whoever owns the engine and the config file: the model is what
+            // the next request is sent with, and neither the key nor the file it is named in is
+            // something this object can see. The app hands the question on rather than guessing.
+            "model" => {
+                return Some(CommandOutcome::Model(
+                    (!argument.is_empty()).then(|| argument.to_string()),
+                ));
+            }
+            "key" => return Some(CommandOutcome::Key),
             _ => {}
         }
         Some(CommandOutcome::Handled)
     }
 
-    fn set_theme(&mut self, argument: &str) {
+    fn set_theme(&mut self, argument: &str) -> Option<CommandOutcome> {
         if argument.is_empty() {
-            self.host.note("usage: /theme <name>");
-            return;
+            // The names, not a usage line: someone who typed `/theme` alone is asking what there is.
+            self.host.note(&format!(
+                "/theme <name>\n{}",
+                crate::theme::Theme::NAMES.join("、")
+            ));
+            return None;
         }
         match crate::theme::Theme::named(argument) {
             // The glyph choice is kept: `/theme` is about colours, and having it silently undo
             // `/glyphs` would make the two commands fight over one setting.
             Some(theme) => {
                 let set = self.host.theme().glyphs.set;
-                self.host.set_theme(theme.with_glyphs(set));
+                // Fitted to this terminal exactly as the theme chosen at startup is. One theme
+                // applied one way at startup and another way from here would be two themes with one
+                // name — and the one from here is the one somebody is looking at when they notice.
+                self.host.set_theme(
+                    theme
+                        .with_glyphs(set)
+                        .downsampled(*crate::terminal::COLOR_MODE),
+                );
+                Some(CommandOutcome::Keep {
+                    table: "theme",
+                    key: "name",
+                    value: argument.to_string(),
+                })
             }
-            None => self.host.note(&format!("no such theme: {argument}")),
+            None => {
+                self.host.note(&format!(
+                    "no such theme: {argument}\n{}",
+                    crate::theme::Theme::NAMES.join("、")
+                ));
+                None
+            }
         }
     }
 
-    fn set_glyphs(&mut self, argument: &str) {
+    fn set_glyphs(&mut self, argument: &str) -> Option<CommandOutcome> {
         let set = match argument {
             "unicode" => GlyphSet::Unicode,
             "ascii" => GlyphSet::Ascii,
             "" => {
-                self.host.note("usage: /glyphs unicode|ascii");
-                return;
+                self.host.note("/glyphs unicode|ascii");
+                return None;
             }
             other => {
                 self.host
                     .note(&format!("no such glyph set: {other} — unicode or ascii"));
-                return;
+                return None;
             }
         };
         let theme = self.host.theme().clone().with_glyphs(set);
         self.host.set_theme(theme);
+        Some(CommandOutcome::Keep {
+            table: "theme",
+            key: "glyphs",
+            value: argument.to_string(),
+        })
     }
 
     /// One frame. Drawing is what clears the flag: a frame is the answer to "something happened".
@@ -538,6 +574,21 @@ pub enum CommandOutcome {
     /// The line asked for another conversation. The app cannot switch one itself — the history has one
     /// owner, and it is not this — so it hands the id back for whoever does own it.
     Resume(String),
+    /// The line asked which model answers, or asked to switch it. Both answers are the engine's: the
+    /// model is what the next request is made with, and the default a new session starts from lives
+    /// in a file this app writes rather than reads.
+    Model(Option<String>),
+    /// The line asked where the API key comes from. The answer is the environment and the config
+    /// file, neither of which this object can see.
+    Key,
+    /// The line changed a setting this object applied itself, and the change is worth keeping: the
+    /// file the next start reads is written by the loop, which is the one place that knows where it
+    /// is and the one place allowed to touch the process's environment.
+    Keep {
+        table: &'static str,
+        key: &'static str,
+        value: String,
+    },
 }
 
 /// What `/help` says. Short, because a help screen nobody reads is a help screen that does not
@@ -545,6 +596,8 @@ pub enum CommandOutcome {
 const HELP: &str = "\
 /help                    this
 /clear                   empty the transcript; the session file stays
+/model [<name>]          which model answers; alone, say which one and what else there is
+/key                     where the API key is read from, and whether it is set
 /theme <name>            switch colours
 /resume [<id>]           continue another conversation held here; alone, list them
 /prompt <name>           start the prompt file from a saved template
@@ -553,7 +606,7 @@ const HELP: &str = "\
 
 In the input line: `/` completes a command, `@` completes a file, `Tab` takes the completion,
 `\u{2191}`/`\u{2193}` choose between them, `Esc` closes them, `Ctrl+Q` quits.
-A command's own values complete too: `/theme dr` offers `dracula`.
+A command's own values complete too: `/theme dr` offers `dracula`, `/model deep` offers the models.
 With the mouse: a click focuses a pane, the wheel scrolls it, dragging a split line moves it.
 `Alt+\u{2190}`/`\u{2192}`/`\u{2191}`/`\u{2193}` move that line from the keyboard.";
 
@@ -1023,6 +1076,56 @@ mod tests {
             "{:?}",
             log.borrow().notes
         );
+    }
+
+    #[test]
+    fn a_theme_applies_at_once_and_is_handed_back_to_be_written_down() {
+        // Both halves, because the bug was the second one: the theme changed for the rest of the
+        // session and was gone at the next start, and nothing said either way. The file is written
+        // by the loop that owns the process's environment, so the app's job ends with saying what
+        // changed — which is what this returns.
+        let (mut app, _) = app_with_recorder();
+        let before = app.host().theme().clone();
+
+        assert_eq!(
+            app.handle_command("/theme dracula"),
+            Some(CommandOutcome::Keep {
+                table: "theme",
+                key: "name",
+                value: "dracula".into(),
+            })
+        );
+        assert_eq!(app.host().theme().name, "dracula", "而且是当场就生效的");
+        assert_ne!(
+            app.host().theme().palette,
+            before.palette,
+            "调色板确实换了，不只是记了个名字"
+        );
+
+        // An unknown name is answered and writes nothing.
+        assert_eq!(
+            app.handle_command("/theme nope"),
+            Some(CommandOutcome::Handled)
+        );
+        assert_eq!(app.host().theme().name, "dracula");
+    }
+
+    #[test]
+    fn the_model_and_the_key_are_handed_to_whoever_owns_them() {
+        // Neither is this object's to answer: the model is what the next request is sent with and
+        // the default lives in a file, and the key is an environment variable. Guessing here is how
+        // `/key` would end up saying something untrue.
+        let (mut app, _) = app_with_recorder();
+        assert_eq!(
+            app.handle_command("/model"),
+            Some(CommandOutcome::Model(None)),
+            "没有参数就是问，不是改"
+        );
+        assert_eq!(
+            app.handle_command("/model deepseek-reasoner"),
+            Some(CommandOutcome::Model(Some("deepseek-reasoner".into())))
+        );
+        assert_eq!(app.handle_command("/key"), Some(CommandOutcome::Key));
     }
 
     #[test]

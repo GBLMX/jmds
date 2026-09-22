@@ -78,8 +78,10 @@ for the tool to run commands with, so those tests are `#[cfg(unix)]` rather than
 still builds the workspace and runs everything that needs no shell.
 
 The key is read from the environment variable named in the config file, never from the file itself:
-`~/.config/jmds/config.toml`, written on first save, and read on every start. A missing key is not
-a crash — the app runs, and says so in the transcript when you ask something.
+`~/.config/jmds/config.toml`, read on every start and written when `/theme`, `/glyphs` or `/model`
+changes something — the write edits your document in place, so comments and order survive. A missing
+key is not a crash: the app runs, and says so in the transcript when you ask something. `/key` says
+the same thing on demand, including the line to put in your shell.
 
 ### Keys
 
@@ -95,7 +97,7 @@ a crash — the app runs, and says so in the transcript when you ask something.
 | `Alt+1`…`Alt+9` | jump to a pane by position |
 | `Alt+←` / `Alt+→` | move the focused pane's split line sideways |
 | `Alt+↑` / `Alt+↓` | move it up and down |
-| `/` then `Tab` | complete a command; `/theme ` and `/prompt ` complete their values |
+| `/` then `Tab` | complete a command; `/theme `, `/model ` and `/prompt ` complete their values |
 | `@` then `Tab` | complete a path |
 | click / wheel / drag | focus a pane / scroll the one under the pointer / move a split line |
 
@@ -110,6 +112,8 @@ Typed in the input line, starting with a slash:
 |---|---|
 | `/help` | what the keys do |
 | `/clear` | empty the transcript; the session file stays |
+| `/model [<name>]` | which model answers: alone it says which one and what else there is; with a name it switches, and writes the default a *new* session starts from — a continued session keeps the model its history came from |
+| `/key` | where the key is read from, whether this process has one, and the line that sets it |
 | `/resume [<id>]` | continue another conversation held in this directory; alone, it lists them |
 | `/theme <name>` | switch colours: `terminal`, `default`, `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark` |
 | `/prompt <name>` | start the prompt file from a template in `~/.config/jmds/prompts/` |

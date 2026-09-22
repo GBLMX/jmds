@@ -24,6 +24,14 @@ use crate::{logger::Logger, paths::config_file};
 /// or changes meaning, and add the matching step to [`migrate::migrate_document`].
 pub const CONFIG_VERSION: u32 = 1;
 
+/// The models this build knows by name.
+///
+/// Not a limit: `/model` hands whatever it is given to the service, and a model this build has never
+/// heard of is the normal way to use a new one. This is the list a person is choosing *between*, so
+/// it is the one the menu offers and the one `/model` answers with — one list, in one place, because
+/// two lists are two chances to disagree about what exists.
+pub const KNOWN_MODELS: &[&str] = &["deepseek-chat", "deepseek-reasoner"];
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -208,6 +216,58 @@ impl Config {
             String::new()
         })
     }
+
+    /// Change one setting in the file the user has, and leave the rest of it alone.
+    ///
+    /// The document is edited rather than replaced, the way [`migrate`] edits it: the comments, the
+    /// ordering, and every key this build does not know about belong to whoever wrote them, and a
+    /// config file that loses them on its first write is a file nobody writes in twice. A file that
+    /// is not there yet starts from the defaults, so the first thing anyone changes by command
+    /// leaves something to read.
+    ///
+    /// A file that does not parse is an error and is not written over, which is the rule
+    /// [`Self::load`] follows and for the same reason: the text is the user's, and a run is not
+    /// worth someone's file.
+    pub fn set_setting(path: &Path, table: &str, key: &str, value: &str) -> io::Result<()> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Self::default().to_toml(),
+            Err(error) => return Err(error),
+        };
+        let mut document: toml_edit::DocumentMut = text.parse().map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("{} 解析失败：{error} —— 没有改动它", path.display()),
+            )
+        })?;
+        // The new value is handed whatever the old one had around it — the user's spacing, a comment
+        // at the end of that line. `migrate.rs` sets the version key the same way, for the same
+        // reason, and a comment that disappears when its key is changed is a comment nobody writes.
+        let mut value = toml_edit::Value::from(value);
+        let table = document
+            .entry(table)
+            .or_insert_with(|| toml_edit::Item::Table(toml_edit::Table::new()))
+            .as_table_mut()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{} 里的 {table} 不是一个表", path.display()),
+                )
+            })?;
+        match table.get_mut(key).and_then(toml_edit::Item::as_value_mut) {
+            Some(existing) => {
+                *value.decor_mut() = existing.decor().clone();
+                *existing = value;
+            }
+            None => {
+                table.insert(key, toml_edit::Item::Value(value));
+            }
+        }
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        fs::write(path, document.to_string())
+    }
 }
 
 #[cfg(test)]
@@ -248,6 +308,64 @@ mod tests {
     fn a_missing_file_is_not_an_error() {
         let path = scratch("missing");
         assert_eq!(Config::load_from(&path), Config::default());
+    }
+
+    #[test]
+    fn changing_one_setting_edits_the_users_file_instead_of_replacing_it() {
+        let path = scratch("set-setting");
+        let original = "\
+# 我的注释：改模型前先看一眼价格
+config_version = 1
+
+[api]
+model = \"deepseek-chat\"   # 便宜的那个
+base_url = \"https://api.deepseek.com\"
+
+[editor]
+tab_width = 2
+";
+        write(&path, original);
+        Config::set_setting(&path, "api", "model", "deepseek-reasoner").unwrap();
+        let after = fs::read_to_string(&path).unwrap();
+
+        assert!(after.contains("model = \"deepseek-reasoner\""), "{after}");
+        for kept in [
+            "# 我的注释：改模型前先看一眼价格",
+            "# 便宜的那个",
+            "base_url = \"https://api.deepseek.com\"",
+            "tab_width = 2",
+        ] {
+            assert!(after.contains(kept), "`{kept}` 不该被动过:\n{after}");
+        }
+        // What is read back is the file: a write that cannot be read is not a write.
+        let back = Config::load_from(&path);
+        assert_eq!(back.api.model, "deepseek-reasoner");
+        assert_eq!(back.editor.tab_width, 2);
+    }
+
+    #[test]
+    fn changing_a_setting_in_a_file_that_is_not_there_yields_one_to_read() {
+        let path = scratch("set-setting-first-time");
+        assert!(!path.exists());
+        Config::set_setting(&path, "api", "model", "deepseek-reasoner").unwrap();
+
+        let back = Config::load_from(&path);
+        assert_eq!(back.api.model, "deepseek-reasoner");
+        // Everything else is still the default, and the file is complete enough to edit by hand.
+        assert_eq!(back.api.api_key_env, ApiConfig::default().api_key_env);
+        assert_eq!(back.editor.tab_width, EditorConfig::default().tab_width);
+        let written = fs::read_to_string(&path).unwrap();
+        assert!(!written.contains("sk-"), "key 不该出现在文件里:\n{written}");
+    }
+
+    #[test]
+    fn a_file_that_does_not_parse_is_not_written_over_by_a_change() {
+        let path = scratch("set-setting-garbage");
+        let garbage = "this is not toml = = =\n";
+        write(&path, garbage);
+
+        assert!(Config::set_setting(&path, "api", "model", "deepseek-reasoner").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), garbage);
     }
 
     #[test]
