@@ -16,3 +16,7 @@ toml_edit = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+# The process-group kill in `tools::bash`: killing `bash` alone leaves what it started running.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

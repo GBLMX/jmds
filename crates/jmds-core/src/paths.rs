@@ -28,6 +28,14 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// Where a tool puts output too long to hand back inline.
+///
+/// Under the cache rather than the config: an artifact is reproducible output, not something the
+/// user maintains, and it is safe to delete.
+pub fn artifacts_dir() -> PathBuf {
+    cache_dir().join("artifacts")
+}
+
 /// `~/x` — what a person, or a model, writes.
 ///
 /// The shell is not on the path when the path comes from a tool call or a prompt file, so a `~`
@@ -55,7 +63,7 @@ mod tests {
     fn every_path_is_named_after_the_app() {
         // The failure this guards against is a rename that misses one of them: two directories
         // under two names is how a config file "disappears" after an upgrade.
-        for path in [config_dir(), cache_dir(), config_file()] {
+        for path in [config_dir(), cache_dir(), config_file(), artifacts_dir()] {
             assert!(
                 path.components().any(|c| c.as_os_str() == APP),
                 "{} is not under {APP}",

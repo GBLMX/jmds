@@ -16,7 +16,8 @@ rustls = { version = "0.23.43", default-features = false, features = ["ring", "s
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
-tokio = { version = "1.53.1", features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["io-util", "macros", "process", "rt", "rt-multi-thread", "sync", "time"] }
+libc = "0.2"
 toml_edit = { version = "0.25.15", features = ["serde"] }
 tracing = "0.1.44"
 tracing-appender = "0.2.5"

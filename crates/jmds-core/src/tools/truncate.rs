@@ -18,6 +18,14 @@ pub const MAX_LINES: usize = 2000;
 /// enormous line is not covered by a line count.
 pub const MAX_BYTES: usize = 50 * 1024;
 
+/// How much of a single line a command's output may show.
+///
+/// A build log or a minified file can have one line of megabytes; without a per-line cap a single
+/// line can fill the whole budget and the hundred useful lines after it are never shown. Only the
+/// tail shape caps columns: a *read* refuses a first line it cannot show whole (see
+/// [`head`]'s `first_line_overflows`) because half a source line is worse than an instruction.
+pub const MAX_COLUMN: usize = 512;
+
 /// What one truncation did, and what the caller has to say about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Truncated {
@@ -144,6 +152,31 @@ pub fn tail(text: &str, max_lines: usize, max_bytes: usize) -> Truncated {
     }
 }
 
+/// Cut every line to `cap` bytes, marking where it was cut.
+///
+/// The mark matters: a silently shortened line reads as a complete one.
+pub fn cap_columns(text: &str, cap: usize) -> String {
+    let mut out = String::with_capacity(text.len());
+    for (index, line) in text.split('\n').enumerate() {
+        if index > 0 {
+            out.push('\n');
+        }
+        if line.len() <= cap {
+            out.push_str(line);
+            continue;
+        }
+        // Not on a char boundary necessarily: cut on the last boundary that fits, so the result
+        // stays valid UTF-8 rather than being a byte slice of a multi-byte character.
+        let mut end = cap;
+        while end > 0 && !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push_str(&line[..end]);
+        out.push_str(&format!("…[+{} bytes]", line.len() - end));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,6 +291,31 @@ mod tests {
             assert!(out.is_empty());
             assert_eq!(out.total_lines, 0);
         }
+    }
+
+    #[test]
+    fn a_very_long_line_is_cut_with_a_mark_and_the_rest_is_left_alone() {
+        let long = "x".repeat(1000);
+        let text = format!("short\n{long}\nalso short");
+        let capped = cap_columns(&text, 100);
+        let lines: Vec<&str> = capped.split('\n').collect();
+        assert_eq!(lines[0], "short");
+        assert_eq!(lines[2], "also short");
+        assert!(
+            lines[1].starts_with(&"x".repeat(100)),
+            "{:?}",
+            &lines[1][..80]
+        );
+        assert!(lines[1].ends_with("…[+900 bytes]"), "{}", &lines[1][90..]);
+    }
+
+    #[test]
+    fn cutting_a_column_never_splits_a_character() {
+        // Every char is three bytes, so a cap of 5 lands mid-character.
+        let text = "①②③";
+        let capped = cap_columns(text, 5);
+        assert!(capped.starts_with('①'), "{capped}");
+        assert_eq!(capped.chars().filter(|c| *c == '①').count(), 1);
     }
 
     #[test]
