@@ -378,7 +378,18 @@ mod tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("jmds-session-{}-{name}", std::process::id()));
+        // A counter as well as the name. Two tests asking for the same name would share one
+        // directory, and each one's `remove_dir_all` would delete the other's fixtures halfway
+        // through — a failure that only appears when the tests run in parallel, which is how they
+        // run, and which looks like a bug in whatever the test was checking.
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "jmds-session-{}-{name}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -408,7 +419,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_file_that_is_not_a_session_is_not_one_and_hides_nothing() {
-        let dir = scratch("not-a-session");
+        let dir = scratch("stray-jsonl");
         let strange = dir.join("notes.jsonl");
         std::fs::write(&strange, "not json at all\n").unwrap();
         assert!(summary(&strange).await.is_err());

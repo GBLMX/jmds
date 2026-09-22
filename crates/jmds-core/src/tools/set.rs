@@ -15,14 +15,34 @@
 //! The order of [`ORDER`] is fixed for the life of the process. The tool table is part of the
 //! prompt prefix, and a prefix that reorders itself between turns is a prefix that never hits the
 //! provider's cache.
+//!
+//! A `bash` call is also the one tool call someone can *watch*: the set opens a terminal pane for
+//! it, mirrors the command's output into that pane, and takes `Ctrl+C` (or the pane being closed)
+//! as "stop this call". That is deliberately here rather than in [`bash`]: a call's lifetime
+//! belongs to whoever started it, and the tool set outlives the call — the pane has to be closed
+//! by something that is still around when a *later* call needs the room.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::VecDeque,
+    path::{Path, PathBuf},
+};
 
 use jmds_api::ToolSpec;
 use serde::de::DeserializeOwned;
+use tokio::sync::{broadcast, oneshot};
 
 use super::{bash, edit, queue::FileMutex, read, write};
-use crate::event::{EventBus, FileEvent};
+use crate::event::{Event, EventBus, FileEvent, PaneEvent, PtyEvent};
+use crate::pane::{PaneId, PaneKind, PaneSpec};
+
+/// 同时留几个 `bash` 面板。
+///
+/// 两个：一格是这次调用，一格是上一次的 —— 人回头看「刚才跑的是什么」，看的就是上一格。再多
+/// 就把布局挤没了，而这套布局里还有会话、编辑器和文件树。
+const TOOL_PANES: usize = 2;
+
+/// 面板里按下的 Ctrl+C，就是终端里的那个字节。
+const CTRL_C: u8 = 0x03;
 
 /// The tools, in the order the model is told about them.
 pub const ORDER: [&str; 4] = ["read", "write", "edit", "bash"];
@@ -70,6 +90,11 @@ pub struct ToolSet {
     /// Optional because it genuinely is: a tool set driven straight from a test has no bus, and a
     /// write nobody watches is exactly what such a test wants. See [`Self::announce_write`].
     bus: Option<EventBus>,
+    /// 我开过的 `bash` 面板，最旧的在前。
+    ///
+    /// 记着是为了开新的之前把最旧的那一格关掉：模型连跑三十个命令，布局就淹了。上限是
+    /// [`TOOL_PANES`]。没有总线时这份名单一直是空的 —— 没人能看的东西不必开出来。
+    panes: parking_lot::Mutex<VecDeque<PaneId>>,
 }
 
 /// What one tool call produced.
@@ -107,6 +132,7 @@ impl ToolSet {
             cwd: cwd.into(),
             files: FileMutex::new(),
             bus: None,
+            panes: parking_lot::Mutex::new(VecDeque::new()),
         }
     }
 
@@ -279,9 +305,28 @@ impl ToolSet {
             Ok(args) => args,
             Err(outcome) => return *outcome,
         };
-        match bash::bash(&args, &self.cwd).await {
+        // 有总线才有面板：一次没人看得见的调用不必多出一格，而没有总线的工具集（测试里的那些）
+        // 走的还是老路 —— 参数是 `None`，别的什么都没变。
+        let watch = self.bus.as_ref().map(|bus| {
+            let id = PaneId::fresh();
+            // 订阅得在面板开出来之前拿到：这一格一出现，用户下一秒就可能按下 Ctrl+C，而总线上
+            // 早于订阅的事件不会补发 —— 那一按就丢了。
+            let stop = watch_for_stop(id, bus);
+            self.open_tool_pane(id, bus, &args.command);
+            bash::Watch {
+                id,
+                bus: bus.clone(),
+                stop,
+            }
+        });
+        // The pane is opened before the command is, so a call that never starts has to take its pane
+        // back: the id is kept here because `bash` takes the watch by value.
+        let pane = watch.as_ref().map(|watch| watch.id);
+        match bash::bash(&args, &self.cwd, watch).await {
             Ok(out) => {
-                let status = if out.timed_out {
+                let status = if out.interrupted {
+                    "interrupted".to_string()
+                } else if out.timed_out {
                     "timed out".to_string()
                 } else if let Some(code) = out.exit_code {
                     format!("exit {code}")
@@ -300,8 +345,46 @@ impl ToolSet {
                     ToolOutcome::done(summary, content)
                 }
             }
-            Err(error) => ToolOutcome::failed(format!("bash failed: {error}"), error.to_string()),
+            Err(error) => {
+                if let (Some(bus), Some(id)) = (self.bus.as_ref(), pane) {
+                    self.close_tool_pane(id, bus);
+                }
+                ToolOutcome::failed(format!("bash failed: {error}"), error.to_string())
+            }
         }
+    }
+
+    /// Take back the pane of a call that never started.
+    ///
+    /// The pane is opened before the command is, so a `bash` that fails outright — a working
+    /// directory that is not there, a shell that will not spawn — leaves a pane with nothing to show
+    /// and nothing that will ever appear in it. The tool result already says what went wrong; an
+    /// empty pane would just be one more thing for the person to close by hand.
+    fn close_tool_pane(&self, id: PaneId, bus: &EventBus) {
+        self.panes.lock().retain(|held| *held != id);
+        bus.publish(PaneEvent::Closed { id });
+    }
+
+    /// 把这次调用的那一格开出来，空间不够就先关掉最旧的一格。
+    ///
+    /// 开和关是一件事：一次调用只该多出一格，而布局是有上限的。关的是**最旧的**那一格 ——它
+    /// 多半是上一次调用留下的，而关掉面板本身会把那次调用停下（面板没了，没人看得见它，也就
+    /// 没人停得住它），所以被关掉的那一格不会是「没人管的进程」。
+    fn open_tool_pane(&self, id: PaneId, bus: &EventBus, command: &str) {
+        {
+            let mut panes = self.panes.lock();
+            // 先腾地方再开：中间那一瞬间布局也不会超过上限。
+            while panes.len() >= TOOL_PANES {
+                let Some(oldest) = panes.pop_front() else {
+                    break;
+                };
+                bus.publish(PaneEvent::Closed { id: oldest });
+            }
+            panes.push_back(id);
+        }
+        bus.publish(PaneEvent::Opened {
+            spec: PaneSpec::new(id, PaneKind::Terminal).with_title(first_line(command)),
+        });
     }
 
     /// Parse a call's arguments, turning a malformed one into a result the model can act on.
@@ -319,6 +402,41 @@ impl ToolSet {
             ))
         })
     }
+}
+
+/// 盯住总线上这一格的两个「停下」：面板里按了 Ctrl+C，或者面板被关掉了。
+///
+/// 这是引擎这一侧的活：面板只知道用户按了什么，而「这次调用要不要停」由起它的那一方决定 ——
+/// 面板从来碰不到进程组。返回的收端交给 [`bash::Watch`]，被叫停时它会就绪。
+///
+/// 订阅要在面板开出来**之前**拿到（见 [`ToolSet::call_bash`]）：总线上早于订阅的事件不会补发，
+/// 而用户可能在这一格刚出现时就按下键。
+fn watch_for_stop(id: PaneId, bus: &EventBus) -> oneshot::Receiver<()> {
+    let (mut tx, rx) = oneshot::channel();
+    let mut events = bus.subscribe();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                // 收端没了就是这次调用已经结束了，谁也不用再停：任务收工。不然每跑一条命令都会
+                // 留下一个永远在听的订阅者。
+                _ = tx.closed() => return,
+                event = events.recv() => match event {
+                    Ok(Event::Pty(PtyEvent::Input { id: to, bytes }))
+                        if to == id && bytes.contains(&CTRL_C) => break,
+                    Ok(Event::Pty(PtyEvent::Kill { id: to })) if to == id => break,
+                    // 这一格自己的输出、别的格子、别的事件，都和「停下」无关。
+                    Ok(_) => {}
+                    // 落后只说明中间的事件丢了；这次调用还在跑，就接着听。
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    // 总线没了：整个程序在收摊，没有谁会再叫停了。
+                    Err(broadcast::error::RecvError::Closed) => return,
+                },
+            }
+        }
+        // 收端还在，说明这次调用还在等；收端已经没了，说明它结束了 —— 那就不用停了。
+        let _ = tx.send(());
+    });
+    rx
 }
 
 /// The first line of a command, trimmed, for a one-line summary.
@@ -551,5 +669,286 @@ mod tests {
             .await;
         assert!(read.ok, "{}", read.content);
         assert!(events.try_recv().is_err(), "读文件不写盘，不该有公告");
+    }
+
+    #[tokio::test]
+    async fn a_call_that_never_starts_takes_its_pane_back() {
+        let bus = EventBus::new(64);
+        let mut events = bus.subscribe();
+        let set = ToolSet::new(scratch("no-cwd")).with_bus(bus);
+
+        // A working directory that is not there: `bash` fails before the command starts, so the pane
+        // opened for it would have nothing in it — ever.
+        let outcome = set
+            .call(
+                "bash",
+                r#"{"command":"echo hi","cwd":"/definitely/not/here"}"#,
+            )
+            .await;
+        assert!(!outcome.ok, "{}", outcome.content);
+
+        let published = drained(&mut events);
+        let opened: Vec<PaneId> = published
+            .iter()
+            .filter_map(|event| match event {
+                Event::Pane(PaneEvent::Opened { spec }) => Some(spec.id),
+                _ => None,
+            })
+            .collect();
+        let closed: Vec<PaneId> = published
+            .iter()
+            .filter_map(|event| match event {
+                Event::Pane(PaneEvent::Closed { id }) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened.len(), 1, "先开了它");
+        assert_eq!(closed, opened, "然后收了回去，不留一格空面板");
+    }
+
+    /// 总线上的事件，一次取完。
+    fn drained(events: &mut broadcast::Receiver<Event>) -> Vec<Event> {
+        let mut seen = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            seen.push(event);
+        }
+        seen
+    }
+
+    /// 等面板开出来，把它认出来。
+    ///
+    /// 等事件而不是猜 id：id 是引擎铸的，面板知道它的唯一途径就是这一条 `Opened`。
+    async fn wait_for_pane(events: &mut broadcast::Receiver<Event>) -> PaneId {
+        loop {
+            match events.recv().await {
+                Ok(Event::Pane(PaneEvent::Opened { spec })) => return spec.id,
+                Ok(_) => {}
+                Err(error) => panic!("面板一直没开出来：{error}"),
+            }
+        }
+    }
+
+    /// 等一个文件出现 —— 按 Ctrl+C 之前得等命令把自己的组号写下来。
+    async fn wait_for_file(path: &Path) {
+        for _ in 0..500 {
+            if path.exists() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("{} 一直没出现", path.display());
+    }
+
+    /// 这一组还在不在。信号 0 只是问一问，什么都没发出去；`ESRCH` 就是「查无此组」。
+    ///
+    /// 和 `bash` 自己的测试问的是同一个问题：命令是引擎起的那一组里的，面板按下的那个键要
+    /// 带走的是**一组**，不是 bash 一个。
+    #[cfg(unix)]
+    async fn group_gone(pgid: i32) -> bool {
+        for _ in 0..100 {
+            // SAFETY: 这里只查一个进程组在不在，没有内存可谈。
+            let asked = unsafe { libc::kill(-pgid, 0) };
+            if asked == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+                return true;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    #[tokio::test]
+    async fn a_bash_call_gets_a_terminal_pane_and_reports_what_it_saw() {
+        let dir = scratch("bash-pane");
+        let bus = crate::event::EventBus::new(64);
+        let mut events = bus.subscribe();
+        let set = ToolSet::new(&dir).with_bus(bus);
+
+        let outcome = set.call("bash", r#"{"command":"echo hi"}"#).await;
+        assert!(outcome.ok, "{outcome:?}");
+
+        let seen = drained(&mut events);
+        let id = match seen.first() {
+            Some(Event::Pane(PaneEvent::Opened { spec })) => {
+                assert_eq!(spec.kind, PaneKind::Terminal, "一格终端面板");
+                assert_eq!(spec.title, "echo hi", "标题是这一格的用途：命令的首行");
+                spec.id
+            }
+            other => panic!("面板该先开出来：{other:?}"),
+        };
+        // 引擎那边说的是同一件事：这一格在跑什么，写了什么，怎么结束的。
+        assert!(
+            seen.contains(&Event::Pty(PtyEvent::Started {
+                id,
+                title: "echo hi".to_string()
+            })),
+            "{seen:?}"
+        );
+        let output: Vec<u8> = seen
+            .iter()
+            .filter_map(|event| match event {
+                Event::Pty(PtyEvent::Output { id: to, bytes }) if *to == id => Some(bytes.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(String::from_utf8_lossy(&output), "hi\n");
+        assert_eq!(
+            seen.last(),
+            Some(&Event::Pty(PtyEvent::Exited { id, code: Some(0) })),
+            "{seen:?}"
+        );
+        // 一次调用只开一格，也没有顺手关掉谁：还没到上限。
+        assert!(
+            !seen
+                .iter()
+                .any(|event| matches!(event, Event::Pane(PaneEvent::Closed { .. }))),
+            "{seen:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_c_in_the_pane_stops_the_command() {
+        let dir = scratch("bash-ctrl-c");
+        let bus = crate::event::EventBus::new(256);
+        let mut events = bus.subscribe();
+        let set = ToolSet::new(&dir).with_bus(bus.clone());
+        let pid_file = dir.join("pid");
+        let command = format!(
+            r#"{{"command":"echo $$ > {}; sleep 30"}}"#,
+            pid_file.display()
+        );
+
+        let press = async {
+            let id = wait_for_pane(&mut events).await;
+            // 等它把自己的组号写下来再按：不然杀的是一个还没写下 pid 的进程。
+            wait_for_file(&pid_file).await;
+            // 面板里的 Ctrl+C 就是一串字节，回到引擎是这一条事件 —— 面板从头到尾没碰过进程。
+            bus.publish(PtyEvent::Input {
+                id,
+                bytes: vec![0x03],
+            });
+            id
+        };
+        let started = std::time::Instant::now();
+        let (outcome, id) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(set.call("bash", &command), press)
+        })
+        .await
+        .expect("按了 Ctrl+C 的调用该立刻回来，而不是等 sleep 30 跑完");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "叫停该马上生效，实际等了 {:?}",
+            started.elapsed()
+        );
+        // 停的是这次调用，不是把它算成失败：答案照样回来，只是说清楚它是怎么结束的。
+        assert!(outcome.ok, "被叫停不是调用失败：{outcome:?}");
+        assert!(
+            outcome.content.contains("interrupted"),
+            "{}",
+            outcome.content
+        );
+        assert!(
+            outcome.summary.contains("interrupted"),
+            "{}",
+            outcome.summary
+        );
+
+        let pgid: i32 = std::fs::read_to_string(&pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!(
+            group_gone(pgid).await,
+            "进程组 {pgid} 还活着：`sleep` 没跟着 bash 一起走"
+        );
+
+        // 面板也被告知结束了：它在等的那个东西没有了。
+        assert!(
+            drained(&mut events).contains(&Event::Pty(PtyEvent::Exited { id, code: None })),
+            "面板该看到这一格结束了"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn closing_the_pane_stops_the_command() {
+        // 面板关掉也是「停下」：没人看得见的进程就是没人停得住的进程。
+        let dir = scratch("bash-closed-pane");
+        let bus = crate::event::EventBus::new(256);
+        let mut events = bus.subscribe();
+        let set = ToolSet::new(&dir).with_bus(bus.clone());
+
+        let close = async {
+            let id = wait_for_pane(&mut events).await;
+            bus.publish(PtyEvent::Kill { id });
+        };
+        let started = std::time::Instant::now();
+        let (outcome, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(set.call("bash", r#"{"command":"sleep 30"}"#), close)
+        })
+        .await
+        .expect("面板关掉之后这次调用该回来，而不是跑满 30 秒");
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "关掉面板该马上生效，实际等了 {:?}",
+            started.elapsed()
+        );
+        assert!(outcome.ok, "被叫停不是调用失败：{outcome:?}");
+        assert!(
+            outcome.content.contains("interrupted"),
+            "{}",
+            outcome.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_third_call_closes_the_oldest_pane() {
+        let dir = scratch("bash-cap");
+        let bus = crate::event::EventBus::new(256);
+        let mut events = bus.subscribe();
+        let set = ToolSet::new(&dir).with_bus(bus);
+
+        for command in ["echo one", "echo two", "echo three"] {
+            let outcome = set
+                .call("bash", &format!(r#"{{"command":"{command}"}}"#))
+                .await;
+            assert!(outcome.ok, "{outcome:?}");
+        }
+
+        let mut opened = Vec::new();
+        let mut closed = Vec::new();
+        for event in drained(&mut events) {
+            match event {
+                Event::Pane(PaneEvent::Opened { spec }) => opened.push(spec.id),
+                Event::Pane(PaneEvent::Closed { id }) => closed.push(id),
+                _ => {}
+            }
+        }
+        assert_eq!(opened.len(), 3, "三次调用，三次开面板");
+        assert_eq!(closed, vec![opened[0]], "布局满了，关的是最旧的那一格");
+
+        // 记得的是最近那两格：人回头看的，是这次和上一次。
+        let panes = set.panes.lock();
+        assert_eq!(
+            panes.iter().copied().collect::<Vec<_>>(),
+            vec![opened[1], opened[2]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_set_without_a_bus_runs_bash_and_opens_no_panes() {
+        let dir = scratch("bash-no-bus");
+        let set = ToolSet::new(&dir);
+
+        let outcome = set.call("bash", r#"{"command":"echo hi"}"#).await;
+
+        assert!(outcome.ok, "{outcome:?}");
+        assert!(outcome.content.contains("hi"), "{}", outcome.content);
+        // 没有人能看的东西不必开出来：名单一直是空的。
+        assert!(set.panes.lock().is_empty(), "没有总线就没有面板");
     }
 }
