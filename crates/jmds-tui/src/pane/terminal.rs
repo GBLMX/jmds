@@ -45,8 +45,8 @@ const SCROLLBACK: usize = 2_000;
 
 /// A shell in a pane.
 pub struct TerminalPane {
-    /// The pane's name, which is the program's name unless the program says otherwise.
-    title: String,
+    /// The program's name, as it was launched.
+    program: String,
     /// The title as the host asks for it: the name, plus what happened to the program.
     title_cache: String,
     /// Where keys go.
@@ -128,7 +128,7 @@ impl TerminalPane {
             .to_string();
         Ok(Self {
             title_cache: compose_title(&name, None),
-            title: name,
+            program: name,
             writer,
             incoming,
             parser: vt100::Parser::new(size.0.max(1), size.1.max(1), SCROLLBACK),
@@ -170,7 +170,7 @@ impl TerminalPane {
                     if !self.exited {
                         self.exited = true;
                         self.notice = Some("exited".to_string());
-                        self.title_cache = compose_title(&self.title, self.notice.as_deref());
+                        self.title_cache = compose_title(&self.program, self.notice.as_deref());
                     }
                     break;
                 }
@@ -374,7 +374,7 @@ impl Pane for TerminalPane {
                     KeyOutcome::Handled
                 } else {
                     self.notice = Some("the program is not reading".to_string());
-                    self.title_cache = compose_title(&self.title, self.notice.as_deref());
+                    self.title_cache = compose_title(&self.program, self.notice.as_deref());
                     KeyOutcome::Handled
                 }
             }
