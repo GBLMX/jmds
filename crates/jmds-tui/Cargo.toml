@@ -1,0 +1,26 @@
+[package]
+name = "jmds-tui"
+version = "0.1.0"
+edition = "2024"
+description = "Just My DeepSeek: the terminal — what it can do, and how to talk to it"
+license = "MIT"
+
+[dependencies]
+base64 = "0.23.1"
+crossterm = { workspace = true }
+jmds-core = { path = "../jmds-core" }
+ratatui = { workspace = true }
+serde = { workspace = true }
+unicode-width = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+# The background probe reads and re-modes `/dev/tty` (`terminal/background/unix.rs`):
+# `openpty` for the test that pins the non-canonical read, and the termios/signal calls the
+# probe itself needs.
+libc = "0.2.189"
+
+[target.'cfg(windows)'.dependencies]
+# The console's background colour (`GetConsoleScreenBufferInfoEx`,
+# `terminal/background/windows.rs`): Windows has no `/dev/tty`, and ConPTY does not answer the
+# OSC 11 query the Unix side uses.
+windows-sys = { version = "0.61.2", features = ["Win32_System_Console"] }
