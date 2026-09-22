@@ -23,6 +23,8 @@
 //! navigation impossible. Every key in the first set is one no pane can want for editing — quit,
 //! close, cycle, jump — so the app takes them and the pane gets everything else.
 
+use crate::commands;
+use crate::theme::GlyphSet;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jmds_core::{event::AgentEvent, pane::Axis};
 use ratatui::{buffer::Buffer, layout::Rect};
@@ -150,11 +152,110 @@ impl App {
         self.host.take_requests()
     }
 
+    /// Run a submitted line as a command, if that is what it is.
+    ///
+    /// `None` means the line is not the app's: it is prose, and prose is the model's. A line that
+    /// names a command the app does not have is *answered* rather than forwarded, because a typo
+    /// turned into a question is a typo the model will answer confidently and wrongly.
+    pub fn handle_command(&mut self, line: &str) -> Option<CommandOutcome> {
+        let Some((command, argument)) = commands::parse_command(line) else {
+            if let Some(name) = unknown_command_name(line) {
+                self.host
+                    .note(&format!("no such command: /{name} — /help lists them"));
+                return Some(CommandOutcome::Handled);
+            }
+            return None;
+        };
+        match command.name {
+            "quit" => return Some(CommandOutcome::Quit),
+            "help" => self.host.note(HELP),
+            "clear" => self.host.clear(),
+            "theme" => self.set_theme(argument),
+            "glyphs" => self.set_glyphs(argument),
+            _ => {}
+        }
+        Some(CommandOutcome::Handled)
+    }
+
+    fn set_theme(&mut self, argument: &str) {
+        if argument.is_empty() {
+            self.host.note("usage: /theme <name>");
+            return;
+        }
+        match crate::theme::Theme::named(argument) {
+            // The glyph choice is kept: `/theme` is about colours, and having it silently undo
+            // `/glyphs` would make the two commands fight over one setting.
+            Some(theme) => {
+                let set = self.host.theme().glyphs.set;
+                self.host.set_theme(theme.with_glyphs(set));
+            }
+            None => self.host.note(&format!("no such theme: {argument}")),
+        }
+    }
+
+    fn set_glyphs(&mut self, argument: &str) {
+        let set = match argument {
+            "unicode" => GlyphSet::Unicode,
+            "ascii" => GlyphSet::Ascii,
+            "" => {
+                self.host.note("usage: /glyphs unicode|ascii");
+                return;
+            }
+            other => {
+                self.host
+                    .note(&format!("no such glyph set: {other} — unicode or ascii"));
+                return;
+            }
+        };
+        let theme = self.host.theme().clone().with_glyphs(set);
+        self.host.set_theme(theme);
+    }
+
     /// One frame.
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         self.host.draw(area, buf);
     }
 }
+
+/// The name in a line that looks like an attempted command but is not one.
+///
+/// Narrow on purpose: `/nope` is a typo and deserves an answer, while `/etc/passwd is a file` is a
+/// sentence about a path, and answering *that* with "no such command" would be the app mistaking
+/// prose for a request.
+fn unknown_command_name(line: &str) -> Option<&str> {
+    let name = line
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()
+        .unwrap_or("");
+    let command_shaped = name.chars().next().is_some()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || character == '-' || character == '_'
+        });
+    command_shaped.then_some(name)
+}
+
+/// What a command line meant, once the app has run it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandOutcome {
+    /// The app did it. Nothing goes to the model.
+    Handled,
+    /// The line asked the app to stop.
+    Quit,
+}
+
+/// What `/help` says. Short, because a help screen nobody reads is a help screen that does not
+/// exist; the thing worth putting here is the input line, which is where the commands are found.
+const HELP: &str = "\
+/help                    this
+/clear                   empty the transcript; the session file stays
+/theme <name>            switch colours
+/glyphs unicode|ascii    which glyph set to draw with
+/quit                    leave
+
+In the input line: `/` completes a command, `@` completes a file, `Tab` takes the completion,
+`\u{2191}`/`\u{2193}` choose between them, `Esc` closes them, `Ctrl+Q` quits.";
 
 #[cfg(test)]
 mod tests {
@@ -174,20 +275,34 @@ mod tests {
     type Recorded = Rc<RefCell<Vec<KeyCode>>>;
 
     /// A pane whose answers the test chooses, and which records the keys it was given.
+    /// What the app said to a pane: notes it was given, and how often it was cleared.
+    #[derive(Debug, Default)]
+    struct Log {
+        notes: Vec<String>,
+        clears: usize,
+    }
+
     struct Recorder {
         handles: bool,
         keys: Recorded,
         events: Rc<RefCell<usize>>,
+        log: Rc<RefCell<Log>>,
     }
 
     impl Recorder {
         fn new(handles: bool) -> (Self, Recorded) {
+            Self::with_log(handles, Rc::new(RefCell::new(Log::default())))
+        }
+
+        /// A recorder whose notes and clears the test can read afterwards.
+        fn with_log(handles: bool, log: Rc<RefCell<Log>>) -> (Self, Recorded) {
             let keys = Rc::new(RefCell::new(Vec::new()));
             (
                 Self {
                     handles,
                     keys: keys.clone(),
                     events: Rc::new(RefCell::new(0)),
+                    log,
                 },
                 keys,
             )
@@ -216,6 +331,14 @@ mod tests {
 
         fn on_agent_event(&mut self, _event: &AgentEvent) {
             *self.events.borrow_mut() += 1;
+        }
+
+        fn note(&mut self, text: &str) {
+            self.log.borrow_mut().notes.push(text.to_string());
+        }
+
+        fn clear(&mut self) {
+            self.log.borrow_mut().clears += 1;
         }
     }
 
@@ -249,6 +372,90 @@ mod tests {
 
         assert_eq!(app.on_key(control(KeyCode::Char('q'))), Action::Quit);
         assert!(keys.borrow().is_empty(), "the pane never saw it");
+    }
+
+    /// An app with one recorder pane, and the log it writes to.
+    fn app_with_recorder() -> (App, Rc<RefCell<Log>>) {
+        let log = Rc::new(RefCell::new(Log::default()));
+        let mut app = App::new();
+        app.open(Axis::Horizontal, Recorder::with_log(false, log.clone()).0);
+        (app, log)
+    }
+
+    #[test]
+    fn a_command_is_run_by_the_app_and_never_forwarded() {
+        let (mut app, log) = app_with_recorder();
+        assert_eq!(app.handle_command("/clear"), Some(CommandOutcome::Handled));
+        assert_eq!(log.borrow().clears, 1);
+        assert!(
+            app.take_requests().is_empty(),
+            "the pane asked for nothing: the app answered it"
+        );
+    }
+
+    #[test]
+    fn quit_is_an_outcome_not_a_prompt() {
+        let (mut app, _) = app_with_recorder();
+        assert_eq!(app.handle_command("/quit"), Some(CommandOutcome::Quit));
+        assert!(app.take_requests().is_empty());
+    }
+
+    #[test]
+    fn an_unrecognised_command_is_answered_rather_than_asked() {
+        let (mut app, log) = app_with_recorder();
+        assert_eq!(app.handle_command("/nope"), Some(CommandOutcome::Handled));
+        assert!(
+            log.borrow()
+                .notes
+                .iter()
+                .any(|note| note.contains("no such command")),
+            "{:?}",
+            log.borrow().notes
+        );
+    }
+
+    #[test]
+    fn prose_that_starts_with_a_slash_is_still_prose() {
+        let (mut app, _) = app_with_recorder();
+        // The model's business: answering this with "no such command" would be the app mistaking a
+        // sentence about a path for a request.
+        assert_eq!(app.handle_command("/etc/passwd is just a file"), None);
+        assert_eq!(app.handle_command("what is 2+2?"), None);
+    }
+
+    #[test]
+    fn help_explains_the_line_the_person_is_typing_in() {
+        let (mut app, log) = app_with_recorder();
+        assert_eq!(app.handle_command("/help"), Some(CommandOutcome::Handled));
+        assert!(
+            log.borrow()
+                .notes
+                .iter()
+                .any(|note| note.contains("completes a command")),
+            "{:?}",
+            log.borrow().notes
+        );
+    }
+
+    #[test]
+    fn the_theme_and_the_glyph_set_do_not_fight_over_one_setting() {
+        let (mut app, log) = app_with_recorder();
+        app.handle_command("/glyphs ascii");
+        assert_eq!(app.host().theme().glyphs.set, crate::theme::GlyphSet::Ascii);
+        // A theme brings colours; the glyph choice is the person's and stays.
+        app.handle_command("/theme terminal");
+        assert_eq!(app.host().theme().glyphs.set, crate::theme::GlyphSet::Ascii);
+
+        app.handle_command("/glyphs katakana");
+        assert_eq!(app.host().theme().glyphs.set, crate::theme::GlyphSet::Ascii);
+        assert!(
+            log.borrow()
+                .notes
+                .iter()
+                .any(|note| note.contains("no such glyph set")),
+            "{:?}",
+            log.borrow().notes
+        );
     }
 
     #[test]

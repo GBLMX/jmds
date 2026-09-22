@@ -12,6 +12,8 @@
 //! through `jmds-core`'s event bus.
 
 pub mod app;
+pub mod commands;
+pub mod complete;
 pub mod effects;
 pub mod pane;
 pub mod terminal;

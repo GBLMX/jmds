@@ -155,8 +155,24 @@ async fn session_loop(
                         break;
                     }
                     // What the human pressed Enter on, on its way to the one owner of the history.
-                    for question in app.take_requests() {
-                        let _ = prompts.send(question);
+                    // What the human pressed Enter on. The app's own commands run here and are
+                    // answered here; only prose goes on to the one owner of the history, so a
+                    // mistyped command is never answered by the model.
+                    let mut quit = false;
+                    for line in app.take_requests() {
+                        match app.handle_command(&line) {
+                            Some(jmds_tui::app::CommandOutcome::Quit) => {
+                                quit = true;
+                                break;
+                            }
+                            Some(jmds_tui::app::CommandOutcome::Handled) => {}
+                            None => {
+                                let _ = prompts.send(line);
+                            }
+                        }
+                    }
+                    if quit {
+                        break;
                     }
                 }
                 Some(Ok(TermEvent::Resize(..))) => {}

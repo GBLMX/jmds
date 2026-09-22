@@ -110,6 +110,13 @@ pub trait Pane {
         Vec::new()
     }
 
+    /// Add a line from the app itself, for panes that have somewhere to put one.
+    fn note(&mut self, _text: &str) {}
+
+    /// Forget what is on screen, for panes that accumulate. What is on disk is not this method's
+    /// business: clearing a view is not deleting a record.
+    fn clear(&mut self) {}
+
     /// Where the terminal's cursor belongs, in `area`'s coordinates, if this pane has one.
     ///
     /// The pane cannot place it itself: the cursor is a property of the frame, not of a cell in the
@@ -344,6 +351,26 @@ impl PaneHost {
             requests.extend(pane.take_requests());
         }
         requests
+    }
+
+    /// The focused pane, for the app to talk to directly.
+    pub fn focused_mut(&mut self) -> Option<&mut (dyn Pane + 'static)> {
+        let id = self.focused_id()?;
+        self.pane_mut(id)
+    }
+
+    /// Say something as the app, to whichever pane is focused.
+    pub fn note(&mut self, text: &str) {
+        if let Some(pane) = self.focused_mut() {
+            pane.note(text);
+        }
+    }
+
+    /// Clear whichever pane is focused, if it accumulates anything.
+    pub fn clear(&mut self) {
+        if let Some(pane) = self.focused_mut() {
+            pane.clear();
+        }
     }
 
     /// Tell every pane what happened. Panes that do not care ignore it by default, so this stays a

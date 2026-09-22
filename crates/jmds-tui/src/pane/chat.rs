@@ -32,7 +32,12 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::{KeyOutcome, Pane};
-use crate::{effects, theme::Theme};
+use crate::{
+    commands::SessionSource,
+    complete::{Completion, VISIBLE},
+    effects,
+    theme::Theme,
+};
 
 /// How many lines of a long entry are shown before it is folded.
 const FOLD_AFTER: usize = 3;
@@ -58,6 +63,8 @@ pub enum Entry {
     },
     /// The turn failed.
     Error(String),
+    /// The app talking, not the model: an answer to a command, or a note about one.
+    Note(String),
 }
 
 /// The conversation pane.
@@ -85,6 +92,10 @@ pub struct Chat {
     /// A frame counter for the working line's animation. Nothing here owns a clock: whoever does
     /// calls [`Chat::tick`], so a frame is still a function of the state and the tick.
     tick: u64,
+    /// Where completion candidates come from.
+    source: SessionSource,
+    /// The completion menu, when the caret is inside a command or a path.
+    menu: Option<Completion>,
     outbox: VecDeque<String>,
 }
 
@@ -109,6 +120,9 @@ impl Chat {
             follow: true,
             running: false,
             tick: 0,
+            // The session's own directory: `@` completes what is in front of the person typing.
+            source: SessionSource::new(std::env::current_dir().unwrap_or_default()),
+            menu: None,
             outbox: VecDeque::new(),
         }
     }
@@ -125,6 +139,63 @@ impl Chat {
     /// Take what the human has asked to send, oldest first.
     fn take_outbox(&mut self) -> Vec<String> {
         self.outbox.drain(..).collect()
+    }
+
+    /// Add a line from the app itself.
+    pub fn add_note(&mut self, text: impl Into<String>) {
+        self.entries.push(Entry::Note(text.into()));
+        self.follow = true;
+        self.scroll = 0;
+    }
+
+    /// Forget the transcript. What has been said on disk is the session file's business, not this
+    /// pane's: clearing the screen is not deleting the record.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.open_content = None;
+        self.open_thinking = None;
+        self.tool_names.clear();
+        self.scroll = 0;
+        self.follow = true;
+    }
+
+    /// Recompute the menu from the line and the caret.
+    ///
+    /// Recomputed rather than tracked: the line is short, the sources are small, and a menu that can
+    /// be stale is a menu that offers something the line no longer contains.
+    fn refresh_menu(&mut self) {
+        self.menu = if self.input.starts_with('/') || self.input.contains('@') {
+            Completion::at(&self.input, self.caret, &self.source)
+        } else {
+            None
+        };
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|menu| menu.is_noop(&self.input, self.caret))
+        {
+            self.menu = None;
+        }
+    }
+
+    /// Write the selected completion into the line.
+    ///
+    /// The caret goes where the item says, which is what keeps a directory's token open, and the menu
+    /// is recomputed rather than closed: descending into a directory is exactly the case where the
+    /// next keystroke wants the menu still there.
+    fn accept_completion(&mut self) -> bool {
+        let Some(menu) = self.menu.as_ref() else {
+            return false;
+        };
+        let Some(item) = menu.selected_item().cloned() else {
+            return false;
+        };
+        let (text, caret) = menu.accept(&self.input, &item);
+        self.input = text;
+        self.caret = caret;
+        self.recall = None;
+        self.refresh_menu();
+        true
     }
 
     /// A frame passed. Whoever owns the clock says so; nothing here polls one.
@@ -290,6 +361,7 @@ impl Chat {
                     (glyphs.tool, style, body)
                 }
                 Entry::Error(text) => (glyphs.failure, styles.error, text.clone()),
+                Entry::Note(text) => (glyphs.note, styles.dim, text.clone()),
             };
 
             let body_lines: Vec<&str> = body.split('\n').collect();
@@ -472,10 +544,26 @@ impl Pane for Chat {
             return;
         }
 
-        // The last row is the input; the rest is the transcript. The two must not overlap: an
-        // input row left at the top of the area would draw its prompt over the first transcript row.
+        // The bottom row is the input, and the menu sits directly above it: a menu that covered the
+        // transcript would hide the answer being discussed. The rows are taken from the transcript,
+        // which is why the count has to be known before the transcript is drawn.
+        let menu_rows = self
+            .menu
+            .as_ref()
+            .map_or(0, |menu| menu.items.len().min(VISIBLE) as u16);
         let input_row = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
-        let transcript = Rect::new(area.x, area.y, area.width, area.height - 1);
+        let menu_area = Rect::new(
+            area.x,
+            area.y + area.height - 1 - menu_rows,
+            area.width,
+            menu_rows,
+        );
+        let transcript = Rect::new(
+            area.x,
+            area.y,
+            area.width,
+            area.height.saturating_sub(1 + menu_rows),
+        );
 
         // Wrapped once, by this pane, so the row count used for scrolling is the row count drawn.
         let rows = self.wrapped(transcript.width, theme);
@@ -496,6 +584,29 @@ impl Pane for Chat {
             .style(styles.text)
             .render(transcript, buf);
 
+        if let Some(menu) = &self.menu {
+            // Windowed so the selection is always on screen: a menu that scrolls past the selected
+            // entry is a menu where the keyboard does something invisible.
+            let first = menu.selected.saturating_sub(VISIBLE.saturating_sub(1));
+            for (row, item) in menu.items.iter().skip(first).take(VISIBLE).enumerate() {
+                let y = menu_area.y + row as u16;
+                let selected = first + row == menu.selected;
+                let style = if selected { styles.accent } else { styles.text };
+                let prefix = if selected { theme.glyphs.prompt } else { "  " };
+                buf.set_string(area.x, y, prefix, styles.accent);
+                let label = format!("{:<14}", item.label);
+                buf.set_string(area.x + prefix.chars().count() as u16, y, &label, style);
+                if !item.detail.is_empty() {
+                    buf.set_string(
+                        area.x + prefix.chars().count() as u16 + 15,
+                        y,
+                        &item.detail,
+                        styles.dim,
+                    );
+                }
+            }
+        }
+
         let prompt = theme.glyphs.prompt;
         buf.set_string(area.x, input_row.y, prompt, styles.prompt);
         let window = self.input_window(area.width, prompt);
@@ -508,6 +619,14 @@ impl Pane for Chat {
     }
 
     /// The lines the human has sent, for the app to hand to the engine.
+    fn note(&mut self, text: &str) {
+        self.add_note(text);
+    }
+
+    fn clear(&mut self) {
+        Chat::clear(self);
+    }
+
     fn take_requests(&mut self) -> Vec<String> {
         self.take_outbox()
     }
@@ -528,6 +647,46 @@ impl Pane for Chat {
     }
 
     fn on_key(&mut self, key: KeyEvent) -> KeyOutcome {
+        // The menu, while it is open, owns the keys that navigate it — including `Up` and `Down`,
+        // which are history when there is no menu. A selection that could not be moved without also
+        // walking the history would be unusable.
+        if self.menu.is_some() {
+            match key.code {
+                // `Tab` takes the selection: it is the key that means "yes, that one" in every
+                // composer, and a menu where the obvious key does something else is a menu nobody
+                // trusts. Moving the selection is what the arrows are for.
+                KeyCode::Tab => {
+                    self.accept_completion();
+                    return KeyOutcome::Handled;
+                }
+                KeyCode::Down => {
+                    if let Some(menu) = self.menu.as_mut() {
+                        menu.move_selection(1);
+                    }
+                    return KeyOutcome::Handled;
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    if let Some(menu) = self.menu.as_mut() {
+                        menu.move_selection(-1);
+                    }
+                    return KeyOutcome::Handled;
+                }
+                // `Enter` accepts what is half-written, and sends what is already a whole line: a
+                // line that names a command needs no completion, so making the person press it
+                // twice to run `/quit` would be a rule that only exists to be learned.
+                KeyCode::Enter => {
+                    let finished = crate::commands::parse_command(&self.input).is_some();
+                    if !finished && self.accept_completion() {
+                        return KeyOutcome::Handled;
+                    }
+                }
+                KeyCode::Esc => {
+                    self.menu = None;
+                    return KeyOutcome::Handled;
+                }
+                _ => {}
+            }
+        }
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let caret = self.caret;
@@ -569,6 +728,8 @@ impl Pane for Chat {
             KeyCode::Char(character) if !control && !alt => self.push_input_char(character),
             _ => return KeyOutcome::Ignored,
         }
+        // The line changed, so what can follow it may have too.
+        self.refresh_menu();
         KeyOutcome::Handled
     }
 
@@ -641,6 +802,97 @@ mod tests {
 
     fn area() -> Rect {
         Rect::new(0, 0, 40, 10)
+    }
+
+    fn menu_labels(chat: &Chat) -> Vec<String> {
+        chat.menu
+            .as_ref()
+            .map(|menu| menu.items.iter().map(|item| item.label.clone()).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_slash_opens_the_menu_and_a_command_closes_it() {
+        let mut chat = Chat::new();
+        assert!(chat.menu.is_none(), "nothing typed, nothing to offer");
+        typed(&mut chat, "/");
+        assert_eq!(menu_labels(&chat).len(), crate::commands::COMMANDS.len());
+
+        typed(&mut chat, "cl");
+        assert_eq!(menu_labels(&chat), ["clear"]);
+
+        // A line that is prose is not a menu.
+        let mut chat = Chat::new();
+        typed(&mut chat, "what is /etc for?");
+        assert!(chat.menu.is_none());
+    }
+
+    #[test]
+    fn tab_accepts_the_selected_command() {
+        let mut chat = Chat::new();
+        typed(&mut chat, "/th");
+        assert_eq!(chat.on_key(key(KeyCode::Tab)), KeyOutcome::Handled);
+        // The command that takes an argument leaves a space, so the argument can follow directly.
+        assert_eq!(chat.input, "/theme ");
+        assert_eq!(chat.caret, 7);
+        assert!(chat.menu.is_none(), "and the line is no longer a command");
+    }
+
+    #[test]
+    fn up_and_down_move_the_selection_instead_of_the_history() {
+        let mut chat = Chat::new();
+        chat.history.push("an older line".into());
+        typed(&mut chat, "/");
+        chat.on_key(key(KeyCode::Down));
+        assert_eq!(chat.menu.as_ref().unwrap().selected, 1);
+        chat.on_key(key(KeyCode::Up));
+        assert_eq!(chat.menu.as_ref().unwrap().selected, 0);
+        assert_eq!(chat.input, "/", "and the history stayed out of it");
+    }
+
+    #[test]
+    fn enter_accepts_before_it_sends() {
+        let mut chat = Chat::new();
+        typed(&mut chat, "/qu");
+        chat.on_key(key(KeyCode::Enter));
+        assert_eq!(chat.input, "/quit", "the completion, not the send");
+        assert!(chat.take_outbox().is_empty());
+
+        // Now it sends.
+        chat.on_key(key(KeyCode::Enter));
+        assert_eq!(chat.take_outbox(), ["/quit"]);
+        assert!(chat.input.is_empty());
+    }
+
+    #[test]
+    fn escape_closes_the_menu_without_clearing_the_line() {
+        let mut chat = Chat::new();
+        typed(&mut chat, "/th");
+        chat.on_key(key(KeyCode::Esc));
+        assert!(chat.menu.is_none());
+        assert_eq!(chat.input, "/th", "the half-written command is kept");
+    }
+
+    #[test]
+    fn an_at_path_completes_a_file_in_the_session() {
+        let mut chat = Chat::new();
+        typed(&mut chat, "@Car");
+        assert_eq!(menu_labels(&chat), ["Cargo.toml"]);
+        chat.on_key(key(KeyCode::Tab));
+        assert_eq!(chat.input, "@Cargo.toml");
+        assert!(chat.menu.is_none());
+    }
+
+    #[test]
+    fn accepting_a_directory_keeps_the_menu_open() {
+        let mut chat = Chat::new();
+        typed(&mut chat, "@sr");
+        chat.on_key(key(KeyCode::Tab));
+        assert_eq!(chat.input, "@src/");
+        assert!(
+            !menu_labels(&chat).is_empty(),
+            "inside it, the files are offered"
+        );
     }
 
     fn screen(buf: &Buffer) -> String {

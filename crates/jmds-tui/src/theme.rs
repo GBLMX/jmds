@@ -353,6 +353,10 @@ pub struct Glyphs {
     pub folded: &'static str,
     /// Written before the input line while the caret is somewhere else in it.
     pub caret: &'static str,
+    /// Before a line the app itself is saying, rather than the model or the human.
+    pub note: &'static str,
+    /// Which set these glyphs came from, so switching theme can keep the choice.
+    pub set: GlyphSet,
     /// The box a pane is drawn in.
     pub box_round: BoxGlyphs,
     /// What a working indicator cycles through. Braille, because its cells are dot-aligned and the
@@ -381,6 +385,8 @@ impl Glyphs {
                 failure: "!! ",
                 folded: "…",
                 caret: "▏",
+                note: "· ",
+                set,
                 box_round: BoxGlyphs {
                     top_left: "╭",
                     top_right: "╮",
@@ -398,6 +404,8 @@ impl Glyphs {
                 failure: "!! ",
                 folded: "...",
                 caret: "|",
+                note: "- ",
+                set,
                 box_round: BoxGlyphs {
                     top_left: "+",
                     top_right: "+",
