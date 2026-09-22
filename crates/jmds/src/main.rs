@@ -68,6 +68,10 @@ fn main() -> color_eyre::Result<()> {
         println!("{}", cli::USAGE);
         return Ok(());
     }
+    if args.start == cli::Start::Version {
+        println!("jmds {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -156,7 +160,7 @@ async fn resolve(
     model: &str,
 ) -> Result<Resolved, String> {
     let summary = match request {
-        cli::Start::New | cli::Start::Help => {
+        cli::Start::New | cli::Start::Help | cli::Start::Version => {
             return Ok(Resolved {
                 opening: Opening::New,
                 model: model.to_string(),

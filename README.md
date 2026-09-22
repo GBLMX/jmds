@@ -46,6 +46,7 @@ jmds --resume <id>       # continue a named one
 jmds <id>                # the same thing, for when you have the id in hand
 jmds --branch [<id>]     # start a new conversation branched off one
 jmds --keep <n>          # with --branch: how many messages of its history to keep
+jmds --version           # which build this is
 jmds --help
 ```
 

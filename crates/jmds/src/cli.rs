@@ -23,6 +23,8 @@ pub enum Start {
     },
     /// Print how to use this and stop.
     Help,
+    /// Print the version and stop.
+    Version,
 }
 
 pub const USAGE: &str = "\
@@ -35,6 +37,7 @@ usage:
   jmds <id>               the same thing, for a person who has the id in hand
   jmds --branch [<id>]    start a new conversation branched off one (the latest here by default)
   jmds --keep <n>         with --branch: how many messages of its history to keep
+  jmds --version          which build this is
   jmds --help             this";
 
 /// A parsed command line.
@@ -60,6 +63,14 @@ pub fn parse(arguments: &[String]) -> Result<Args, String> {
             "--help" | "-h" => {
                 return Ok(Args {
                     start: Start::Help,
+                    keep: None,
+                });
+            }
+            // Worth having even with one version: an installed binary is a copy somebody has to be able
+            // to ask about, and `--version` is how they ask.
+            "--version" | "-V" => {
+                return Ok(Args {
+                    start: Start::Version,
                     keep: None,
                 });
             }
@@ -182,6 +193,12 @@ mod tests {
         // which looks exactly like a resume that lost the history.
         let error = parse(&args(&["--resum", "100-0"])).expect_err("该报错");
         assert!(error.contains("--resum"), "{error}");
+    }
+
+    #[test]
+    fn the_version_is_its_own_thing() {
+        assert_eq!(start(&["--version"]), Start::Version);
+        assert_eq!(start(&["-V"]), Start::Version);
     }
 
     #[test]
