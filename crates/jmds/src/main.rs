@@ -1119,7 +1119,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jmds-branch-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        session_file(&dir, "500-0", &dir);
+        session_file(&dir, "500-0", &dir).await;
 
         let resolved = resolve(
             &cli::Start::Branch {
@@ -1154,7 +1154,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("jmds-branch-keep-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        session_file(&dir, "500-0", &dir);
+        session_file(&dir, "500-0", &dir).await;
 
         let resolved = resolve(
             &cli::Start::Branch {
