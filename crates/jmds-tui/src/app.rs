@@ -23,13 +23,15 @@
 //! navigation impossible. Every key in the first set is one no pane can want for editing — quit,
 //! close, cycle, jump — so the app takes them and the pane gets everything else.
 
-use crate::commands;
-use crate::theme::GlyphSet;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jmds_core::{event::AgentEvent, pane::Axis};
 use ratatui::{buffer::Buffer, layout::Rect};
 
-use crate::pane::{Pane, PaneHost};
+use crate::{
+    commands,
+    pane::{Pane, PaneHost},
+    theme::GlyphSet,
+};
 
 /// What the loop should do next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
