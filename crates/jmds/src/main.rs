@@ -34,7 +34,10 @@ use jmds_core::{
 use jmds_tui::{
     app::{Action, App},
     pane::chat::Chat,
-    terminal::{COLOR_MODE, ColorMode, disable_terminal_modes, enable_terminal_modes},
+    terminal::{
+        COLOR_MODE, ColorMode, begin_synchronized_update, disable_terminal_modes,
+        enable_terminal_modes, end_synchronized_update,
+    },
     theme::{GlyphSet, Theme},
 };
 use tokio::{sync::mpsc, task::JoinHandle};
@@ -112,12 +115,18 @@ async fn session_loop(
     app.host_mut().set_theme(theme);
     app.open(jmds_core::pane::Axis::Horizontal, Chat::new());
 
+    let mut out = io::stdout();
     let mut input = EventStream::new();
     let mut events = bus.subscribe();
     let mut ticker = tokio::time::interval(TICK);
 
     loop {
-        terminal.draw(|frame| app.draw(frame.area(), frame.buffer_mut()))?;
+        // One frame, written as one update: without this a redraw is visible while it is being
+        // written, which is exactly what makes an 80 ms animation flicker.
+        begin_synchronized_update(&mut out)?;
+        let drawn = terminal.draw(|frame| app.draw(frame.area(), frame.buffer_mut()));
+        end_synchronized_update(&mut out)?;
+        drawn?;
 
         tokio::select! {
             incoming = input.next() => match incoming {

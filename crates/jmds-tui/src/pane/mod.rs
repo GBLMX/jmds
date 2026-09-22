@@ -31,10 +31,11 @@ use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
     style::Style,
+    text::Line,
     widgets::{Block, Widget},
 };
 
-use crate::theme::Theme;
+use crate::{effects, theme::Theme};
 
 /// The engine's rectangle for a terminal area.
 ///
@@ -282,9 +283,19 @@ impl PaneHost {
             } else {
                 styles.border
             };
+            // The focused pane's title is graded from the accent down to the muted colour: it is
+            // the one piece of the frame that carries a colour ramp, and it is how the eye finds
+            // the pane the keyboard is pointed at without a second border style.
+            let title: Line<'static> = if Some(*id) == focused {
+                effects::Ramp::new(self.theme.palette.accent, self.theme.palette.muted)
+                    .spans(pane.title())
+                    .into()
+            } else {
+                Line::from(pane.title().to_string())
+            };
             let block = Block::bordered()
                 .border_type(self.theme.glyphs.border())
-                .title(pane.title().to_string())
+                .title(title)
                 .title_style(style)
                 .border_style(style)
                 .style(Style::default().fg(self.theme.palette.text));
@@ -348,6 +359,7 @@ mod tests {
 
     use crossterm::event::{KeyCode, KeyModifiers};
     use jmds_core::pane::PaneKind;
+    use ratatui::style::Color;
 
     use super::*;
 
@@ -505,6 +517,48 @@ mod tests {
         assert!(
             screen.contains("chat") && screen.contains("files"),
             "{screen}"
+        );
+    }
+
+    #[test]
+    fn the_focused_title_is_graded_from_the_accent() {
+        // The one colour ramp in the frame, and the only thing besides the border's brightness that
+        // tells the eye where the keyboard is pointed.
+        let mut host = PaneHost::new();
+        host.open(Axis::Horizontal, Recorder::new("chat", "x").0);
+        let focused = host.open(Axis::Horizontal, Recorder::new("files", "y").0);
+
+        let mut buf = Buffer::empty(whole());
+        host.draw(whole(), &mut buf);
+
+        let geometry = host.geometry().to_vec();
+        let rect_of = |id: PaneId| geometry.iter().find(|(open, _)| *open == id).unwrap().1;
+        let title_colours = |rect: PaneRect, title: &str| {
+            ((rect.x + 1)..(rect.x + 1 + title.len() as u16))
+                .map(|x| buf[(x, rect.y)].fg)
+                .collect::<Vec<Color>>()
+        };
+
+        let focused_title = title_colours(rect_of(focused), "files");
+        assert_eq!(focused_title.len(), 5);
+        assert_eq!(
+            focused_title[0],
+            Theme::default().palette.accent,
+            "the focused title starts at the accent"
+        );
+        assert_eq!(
+            focused_title[4],
+            Theme::default().palette.muted,
+            "and ends at the muted colour"
+        );
+        assert_ne!(focused_title[0], focused_title[4], "the ramp is flat");
+
+        // An unfocused title is one colour: the ramp is what marks the focus, so half-applying it
+        // would point at two panes at once.
+        let other = title_colours(rect_of(geometry[0].0), "chat");
+        assert!(
+            other.windows(2).all(|pair| pair[0] == pair[1]),
+            "the unfocused title is graded too: {other:?}"
         );
     }
 

@@ -313,6 +313,20 @@ impl Chat {
         }
 
         if self.running {
+            // The caret rides the end of the answer while it is still arriving, the way a terminal
+            // writes one: the mark is where the text is going, so it points at the last line of the
+            // transcript rather than sitting on a line of its own.
+            if let Some(last) = lines.last_mut()
+                && self.pending_tool().is_none()
+            {
+                let caret = theme.glyphs.caret;
+                let style = if self.tick % 16 < 8 {
+                    styles.accent
+                } else {
+                    styles.dim
+                };
+                last.spans.push(Span::styled(caret.to_string(), style));
+            }
             lines.push(self.working_line(theme));
         }
         lines
@@ -333,7 +347,14 @@ impl Chat {
         // fraction of the way through, which is exactly what a frame counter can supply.
         let phase = (self.tick % 24) as f32 / 24.0;
 
-        let mut spans = vec![Span::styled(format!("{frame} "), styles.accent)];
+        // The glyph breathes rather than sitting at full brightness: it is the thing that says the
+        // app is alive, and a mark that never changes reads as a mark that has stopped.
+        let palette = &theme.palette;
+        let breath = effects::pulse(self.tick, 24);
+        let frame_style =
+            Style::default().fg(effects::blend(palette.muted, palette.accent, breath));
+
+        let mut spans = vec![Span::styled(format!("{frame} "), frame_style)];
         spans.extend(effects::shimmer(&label, phase, styles.dim, styles.accent));
         Line::from(spans)
     }
@@ -600,6 +621,8 @@ impl Pane for Chat {
 
 #[cfg(test)]
 mod tests {
+    use ratatui::style::Color;
+
     use super::*;
 
     fn key(code: KeyCode) -> KeyEvent {
@@ -890,6 +913,102 @@ mod tests {
 
         // Zero width is a pane with nothing to draw into, not an infinite loop.
         assert!(wrap(Line::from("x"), 0).is_empty());
+    }
+
+    #[test]
+    fn the_working_line_animates_as_frames_pass() {
+        // The effect is only an effect if a frame counter moves it: two frames, two glyphs.
+        let frames = Theme::default().glyphs.spinner;
+        let mut chat = Chat::new();
+        chat.on_agent_event(&AgentEvent::TurnStarted {
+            model: "deepseek-chat".into(),
+        });
+        assert!(chat.is_running());
+
+        let first = drawn_lines(&mut chat).join("\n");
+        assert!(first.contains(frames[0]), "first frame: {first}");
+        assert!(!first.contains(frames[1]), "and not the next one yet");
+
+        chat.tick();
+        let second = drawn_lines(&mut chat).join("\n");
+        assert!(second.contains(frames[1]), "after a tick: {second}");
+        assert!(!second.contains(frames[0]), "the previous frame is gone");
+
+        // Past the end of the set it comes round rather than sticking.
+        for _ in 1..frames.len() {
+            chat.tick();
+        }
+        let wrapped = drawn_lines(&mut chat).join("\n");
+        assert!(wrapped.contains(frames[0]), "wrapped: {wrapped}");
+    }
+
+    /// The colour of the last visible cell of the row holding `text`.
+    fn caret_colour(chat: &mut Chat, text: &str) -> Color {
+        let mut buf = Buffer::empty(area());
+        chat.draw(area(), &mut buf, &Theme::default());
+        for row in 0..buf.area.height {
+            let line: String = (0..buf.area.width)
+                .map(|x| buf[(x, row)].symbol().to_string())
+                .collect();
+            if line.contains(text) {
+                // Cells, not bytes: the caret glyph is three bytes wide and one cell.
+                let column = line.trim_end().chars().count().saturating_sub(1) as u16;
+                return buf[(column, row)].fg;
+            }
+        }
+        panic!("{text:?} is not on screen");
+    }
+
+    #[test]
+    fn the_answer_carries_a_caret_while_it_is_still_arriving() {
+        let mut chat = Chat::new();
+        chat.on_agent_event(&AgentEvent::TurnStarted {
+            model: "deepseek-chat".into(),
+        });
+        chat.on_agent_event(&AgentEvent::Content("half an ans".into()));
+
+        let caret = Theme::default().glyphs.caret;
+        let running = drawn_lines(&mut chat);
+        let answer = running
+            .iter()
+            .find(|line| line.contains("half an ans"))
+            .expect("the answer is on screen")
+            .trim_end()
+            .to_string();
+        assert!(
+            answer.ends_with(caret),
+            "{answer:?} does not end with the caret"
+        );
+
+        // The caret stays where it is and its brightness pulses, rather than being blanked: a mark
+        // that came and went would reflow the line under it every half second.
+        let mut colours = Vec::new();
+        for _ in 0..16 {
+            colours.push(caret_colour(&mut chat, "half an ans"));
+            assert!(
+                drawn_lines(&mut chat)
+                    .iter()
+                    .any(|line| line.trim_end().ends_with(caret)),
+                "the caret left the line"
+            );
+            chat.tick();
+        }
+        assert!(
+            colours.windows(2).any(|pair| pair[0] != pair[1]),
+            "the caret never pulsed: {colours:?}"
+        );
+
+        // A finished turn leaves no caret: the answer is no longer arriving.
+        chat.on_agent_event(&AgentEvent::TurnFinished {
+            reason: jmds_core::event::FinishReason::Stop,
+        });
+        let done = drawn_lines(&mut chat)
+            .into_iter()
+            .find(|line| line.contains("half an ans"))
+            .unwrap()
+            .trim_end()
+            .to_string();
+        assert!(!done.ends_with(caret), "{done:?} still has a caret");
     }
 
     #[test]
