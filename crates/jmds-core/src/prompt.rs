@@ -240,9 +240,14 @@ mod tests {
         assert_eq!(prompt.body, "顺便看看帮助文本。");
 
         let assembled = prompt.assemble(Path::new("/work"));
+        // The expected text is built the same way the prompt is: a path joined onto a directory is
+        // spelled however the platform spells it, and asserting a `/` would be asserting Unix.
         assert_eq!(
             assembled,
-            "File: /work/src/main.rs\nTask: 加一个 --version\n\n顺便看看帮助文本。"
+            format!(
+                "File: {}\nTask: 加一个 --version\n\n顺便看看帮助文本。",
+                Path::new("/work").join("src/main.rs").display()
+            )
         );
     }
 

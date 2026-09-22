@@ -301,7 +301,10 @@ fn io_error(error: impl std::fmt::Display) -> io::Error {
     io::Error::other(error.to_string())
 }
 
-#[cfg(test)]
+/// A pty test needs a pty and a shell to run in it. Both are Unix things here: the tests below start
+/// `sh`, and what they are about is how this layer carries a terminal's bytes around, not about how
+/// Windows would spell the same idea. See the note in the README.
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use std::{

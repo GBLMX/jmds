@@ -606,6 +606,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn bash_runs_in_the_session_directory_and_reports_its_status() {
         let dir = scratch("bash");
@@ -633,6 +634,7 @@ mod tests {
         assert!(!outcome.content.is_empty());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_write_announces_itself_so_the_watcher_can_stay_quiet() {
         let dir = scratch("announce");
@@ -758,6 +760,7 @@ mod tests {
         false
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_bash_call_gets_a_terminal_pane_and_reports_what_it_saw() {
         let dir = scratch("bash-pane");
@@ -907,6 +910,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_third_call_closes_the_oldest_pane() {
         let dir = scratch("bash-cap");
@@ -941,6 +945,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_tool_set_without_a_bus_runs_bash_and_opens_no_panes() {
         let dir = scratch("bash-no-bus");

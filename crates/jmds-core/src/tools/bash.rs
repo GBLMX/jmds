@@ -675,7 +675,9 @@ fn artifact_path() -> PathBuf {
     crate::paths::artifacts_dir().join(format!("bash-{stamp}-{n}.log"))
 }
 
-#[cfg(test)]
+/// A shell is what this tool is: it hands the command to `bash` and reads what comes back. There is
+/// no such thing on Windows, so neither is there anything here to test — see the note in the README.
+#[cfg(all(test, unix))]
 mod tests {
     use std::path::{Path, PathBuf};
 
@@ -803,7 +805,14 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(out.cwd, dir.join("sub"));
-        assert_eq!(out.text.text.trim(), dir.join("sub").to_string_lossy());
+        // Through `canonicalize`: the answer is the shell's own `pwd`, and a shell reports where it
+        // really is. Where the OS spells the way there differently — macOS resolves `/var` to
+        // `/private/var` — comparing it to the path we handed in would be comparing two spellings of
+        // the same directory.
+        assert_eq!(
+            std::fs::canonicalize(out.text.text.trim()).unwrap(),
+            std::fs::canonicalize(dir.join("sub")).unwrap()
+        );
 
         // And a command that is only a cd still runs, in that directory.
         let out = bash(&BashArgs::new("cd sub"), &dir, None).await.unwrap();

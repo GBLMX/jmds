@@ -69,6 +69,14 @@ The log lives under `~/.config/jmds/logs/`, beside the sessions and the prompt t
 working directory is a log in whatever project the app was started from, which is where it is least
 wanted.
 
+### A shell is what the `bash` tool is
+
+A `bash` call is handed to `bash` on `PATH` — the tool is a shell, not an imitation of one, which is
+why interrupting a call interrupts a process group and why the pane can be a real terminal. The tests
+that exercise it therefore need a shell, and that makes them Unix tests: on Windows there is nothing
+for the tool to run commands with, so those tests are `#[cfg(unix)]` rather than red. The Windows job
+still builds the workspace and runs everything that needs no shell.
+
 The key is read from the environment variable named in the config file, never from the file itself:
 `~/.config/jmds/config.toml`, written on first save, and read on every start. A missing key is not
 a crash — the app runs, and says so in the transcript when you ask something.

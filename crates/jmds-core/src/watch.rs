@@ -276,6 +276,16 @@ impl Watcher {
         ignore: Ignore,
     ) -> notify::Result<Self> {
         let root = root.as_ref().to_path_buf();
+        // The OS reports paths on its own terms. On macOS a temporary directory is `/private/var/...`
+        // where the caller said `/var/...`, because `/var` is a symlink; Windows can hand back a short
+        // or extended-length form of the same place. Both forms are kept, and every path the
+        // filesystem reports is put back into the caller's terms before it is compared with anything
+        // — the root, the ignore rules, or a write the app announced in its own words.
+        //
+        // Without that, a root the OS spells differently is not a root at all: every event looks like
+        // it comes from outside it (and is dropped), while a file the app wrote itself never matches
+        // its own announcement (and comes back as somebody else's change).
+        let physical_root = std::fs::canonicalize(&root).unwrap_or_else(|_| root.clone());
         let (tx, rx): (Sender<NotifyEvent>, Receiver<NotifyEvent>) = std::sync::mpsc::channel();
         let mut inner = notify::recommended_watcher(move |event: notify::Result<NotifyEvent>| {
             // A backend error is not the end of the watch: the next event still arrives.
@@ -301,6 +311,7 @@ impl Watcher {
                         // Reading it before the wait would race with the loop's first iteration.
                         drain_announcements(&mut announcements, &mut ours, &root);
                         for (path, change) in classify(&event.kind, &event.paths) {
+                            let path = in_the_callers_terms(&root, &physical_root, path);
                             if ignore.ignores(&root, &path) || ours.takes(&path) {
                                 continue;
                             }
@@ -332,6 +343,16 @@ impl Drop for Watcher {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
+    }
+}
+
+/// Put a path the filesystem named back into the terms the caller used.
+///
+/// Only the root's own spelling is translated: what is below it is the same either way.
+fn in_the_callers_terms(root: &Path, physical_root: &Path, path: PathBuf) -> PathBuf {
+    match path.strip_prefix(physical_root) {
+        Ok(rest) if physical_root != root => root.join(rest),
+        _ => path,
     }
 }
 
@@ -602,7 +623,14 @@ mod tests {
         /// Start watching. Separate from `new` so a test can put files in place first: a directory
         /// created before the watch is not an event, and a fixture should not be one either.
         fn watch(&mut self) {
-            self.watcher = Some(Watcher::watch(&self.dir, self.bus.clone()).expect("一个监视器"));
+            let dir = self.dir.clone();
+            self.watch_path(&dir);
+        }
+
+        /// Watch a path other than the fixture's own directory: for a test about how a path is
+        /// spelled rather than where it leads.
+        fn watch_path(&mut self, root: &Path) {
+            self.watcher = Some(Watcher::watch(root, self.bus.clone()).expect("一个监视器"));
         }
 
         fn next(&self, within: Duration) -> Option<Event> {
@@ -679,6 +707,88 @@ mod tests {
             !seen.iter().any(|e| file_path(e).ends_with("ours.txt")),
             "自己写的那条不该回放：{seen:?}"
         );
+    }
+
+    /// The translation itself, which is the part that can fail here.
+    ///
+    /// The filesystem may name a path in its own terms while the caller named the root in its own —
+    /// macOS resolves `/var` to `/private/var`, Windows has short and extended-length forms. Events
+    /// are translated back into the caller's terms so that "inside the root", the ignore rules, and
+    /// the app's own announcements all speak the same language.
+    #[test]
+    fn a_root_the_os_spells_differently_is_put_back_into_the_callers_terms() {
+        let root = Path::new("/var/data");
+        let physical = Path::new("/private/var/data");
+        assert_eq!(
+            in_the_callers_terms(root, physical, PathBuf::from("/private/var/data/a.txt")),
+            PathBuf::from("/var/data/a.txt"),
+        );
+        // Nothing below the root is touched: the two spellings differ only in the root itself.
+        assert_eq!(
+            in_the_callers_terms(
+                root,
+                physical,
+                PathBuf::from("/private/var/data/sub/deep.txt")
+            ),
+            PathBuf::from("/var/data/sub/deep.txt")
+        );
+        // The same spelling is left alone.
+        assert_eq!(
+            in_the_callers_terms(root, root, PathBuf::from("/var/data/a.txt")),
+            PathBuf::from("/var/data/a.txt")
+        );
+        // A path from outside is passed through: whether it is inside the root is the ignore rules'
+        // question, asked next, and a translation is not the place to answer it.
+        assert_eq!(
+            in_the_callers_terms(root, physical, PathBuf::from("/elsewhere/a.txt")),
+            PathBuf::from("/elsewhere/a.txt")
+        );
+    }
+
+    /// The whole chain through a root reached by another name — the shape of the macOS failure.
+    ///
+    /// On Linux this cannot fail either way: inotify names a path exactly as it was watched, so the
+    /// two spellings never arise. It is here for the platforms where they do — which is where the
+    /// watcher really was broken, and which is why the translation above is tested separately: that
+    /// is the part a Linux machine can hold to account.
+    #[test]
+    fn a_root_reached_through_a_symlink_is_still_the_root() {
+        let mut fixture = Fixture::new("alias");
+        let alias = std::env::temp_dir().join(format!("jmds-alias-{}", std::process::id()));
+        let _ = std::fs::remove_file(&alias);
+        std::fs::create_dir_all(fixture.dir.join("target/debug")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&fixture.dir, &alias).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&fixture.dir, &alias).unwrap();
+
+        fixture.watch_path(&alias);
+
+        // Ours, announced under the name the app uses.
+        let ours = alias.join("ours.txt");
+        fixture
+            .bus
+            .publish(FileEvent::EditorWrote { path: ours.clone() });
+        std::fs::write(&ours, "ours").unwrap();
+        // A build product: not ours, and nothing anybody asked about.
+        std::fs::write(alias.join("target/debug/out"), "binary").unwrap();
+        // The fence, written last: anything queued before it would already have arrived.
+        std::fs::write(alias.join("kept.rs"), "fn main() {}").unwrap();
+
+        let seen = fixture.until("kept.rs", Duration::from_secs(5));
+        assert!(
+            seen.iter().any(|e| file_path(e).ends_with("kept.rs")),
+            "该看的改动要到：{seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|e| file_path(e).contains("target")),
+            "构建产物不该出现：{seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|e| file_path(e).ends_with("ours.txt")),
+            "自己写的那条不该回放：{seen:?}"
+        );
+        let _ = std::fs::remove_dir_all(&alias);
     }
 
     #[test]

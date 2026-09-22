@@ -740,13 +740,6 @@ mod tests {
     /// The whole chain the app depends on: a watcher on the session's directory, the bus, the app's
     /// fan-out, and the file tree. Every link has its own tests; this one exists because the chain
     /// is the part that can be wired wrong while all the links pass.
-    ///
-    /// Not run on macOS, and that is a stated limitation rather than a hidden one: there the watcher's
-    /// own layer is covered by `jmds-core`'s filesystem tests (which pass), while this end-to-end one
-    /// publishes nothing at all — a difference between the two that nobody has explained yet, and one
-    /// worth a machine to look into rather than a guess. Leaving it running would only teach us to
-    /// ignore a red job.
-    #[cfg(not(target_os = "macos"))]
     #[tokio::test]
     async fn a_file_written_by_someone_else_turns_up_in_the_file_tree() {
         let dir = std::env::temp_dir().join(format!("jmds-wiring-{}", std::process::id()));
