@@ -34,7 +34,7 @@ use jmds_core::{
 };
 use jmds_tui::{
     app::{Action, App},
-    pane::{chat::Chat, editor::Editor},
+    pane::{chat::Chat, editor::Editor, terminal::TerminalPane},
     terminal::{
         COLOR_MODE, ColorMode, begin_synchronized_update, disable_terminal_modes,
         enable_terminal_modes, end_synchronized_update,
@@ -120,12 +120,20 @@ async fn session_loop(
     // question gets written.
     let chat = app.open(jmds_core::pane::Axis::Horizontal, Chat::new());
     match open_prompt_pane(&cwd, config.editor.tab_width) {
+        // Opened while it has focus, so the next split divides *it* rather than the chat.
         Some(editor) => {
             app.open(jmds_core::pane::Axis::Horizontal, editor);
-            app.host_mut().focus(chat);
         }
         None => log::warn!("提示词文件打不开，这次只有对话面板"),
     }
+    match open_shell_pane(&cwd) {
+        Some(shell) => {
+            app.open(jmds_core::pane::Axis::Vertical, shell);
+        }
+        None => log::warn!("shell 起不来，这次没有终端面板"),
+    }
+    // Focus ends in the chat: that is where a turn is started from.
+    app.host_mut().focus(chat);
 
     let mut out = io::stdout();
     let mut input = EventStream::new();
@@ -287,6 +295,22 @@ fn open_prompt_pane(cwd: &std::path::Path, tab_width: u8) -> Option<Editor> {
         Ok(editor) => Some(editor.with_tab_width(tab_width.max(1) as usize)),
         Err(error) => {
             log::warn!("{} 打不开: {error}", path.display());
+            None
+        }
+    }
+}
+
+/// A shell, in its own pane.
+///
+/// The user's own shell (`$SHELL`), in the session's directory: the pane is for the commands a
+/// person runs by hand, which is why it is a real PTY and not the `bash` tool.
+fn open_shell_pane(cwd: &std::path::Path) -> Option<TerminalPane> {
+    let shell = TerminalPane::shell();
+    // A placeholder size: the first draw tells the PTY what the pane actually got.
+    match TerminalPane::spawn(&shell, &[], cwd, (24, 80)) {
+        Ok(pane) => Some(pane),
+        Err(error) => {
+            log::warn!("{shell} 起不来: {error}");
             None
         }
     }
