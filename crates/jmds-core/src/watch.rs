@@ -21,8 +21,10 @@ use std::{
 };
 
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use notify::event::{ModifyKind, RenameMode};
-use notify::{Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{
+    Event as NotifyEvent, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _,
+    event::{ModifyKind, RenameMode},
+};
 use tokio::sync::broadcast::error::TryRecvError;
 
 use crate::event::{Event, EventBus, FileEvent};
