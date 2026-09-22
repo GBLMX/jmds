@@ -488,11 +488,15 @@ const HELP: &str = "\
 /help                    this
 /clear                   empty the transcript; the session file stays
 /theme <name>            switch colours
+/prompt <name>           start the prompt file from a saved template
 /glyphs unicode|ascii    which glyph set to draw with
 /quit                    leave
 
 In the input line: `/` completes a command, `@` completes a file, `Tab` takes the completion,
-`\u{2191}`/`\u{2193}` choose between them, `Esc` closes them, `Ctrl+Q` quits.";
+`\u{2191}`/`\u{2193}` choose between them, `Esc` closes them, `Ctrl+Q` quits.
+A command's own values complete too: `/theme dr` offers `dracula`.
+With the mouse: a click focuses a pane, the wheel scrolls it, dragging a split line moves it.
+`Alt+\u{2190}`/`\u{2192}`/`\u{2191}`/`\u{2193}` move that line from the keyboard.";
 
 #[cfg(test)]
 mod tests {
@@ -901,6 +905,15 @@ mod tests {
         // sentence about a path for a request.
         assert_eq!(app.handle_command("/etc/passwd is just a file"), None);
         assert_eq!(app.handle_command("what is 2+2?"), None);
+    }
+
+    #[test]
+    fn every_command_is_in_the_help_text() {
+        // The table and the help text are two places the same vocabulary is written down, and a
+        // command nobody can find in `/help` is a command that may as well not exist.
+        for command in crate::commands::COMMANDS {
+            assert!(HELP.contains(command.name), "/help 里没有 {}", command.name);
+        }
     }
 
     #[test]
