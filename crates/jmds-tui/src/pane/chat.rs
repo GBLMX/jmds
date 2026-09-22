@@ -212,6 +212,10 @@ impl Chat {
     /// summary and whether it worked, and neither survives in the message: `ok` is not recorded
     /// anywhere, and inventing one would be showing an outcome that nobody wrote down.
     fn restore(&mut self, messages: &[ChatMessage]) {
+        // Start over: this is either the first thing the pane is told (a session being continued) or a
+        // different conversation taking the place of this one, and appending in the second case would
+        // leave two conversations in one scroll.
+        self.clear();
         for message in messages {
             match message.role {
                 Role::User => {
@@ -933,6 +937,24 @@ mod tests {
             !screen.contains("you are jmds"),
             "system prompt 不是人说过的话：{screen}"
         );
+    }
+
+    #[test]
+    fn restoring_replaces_the_transcript_rather_than_appending_to_it() {
+        let mut chat = Chat::new();
+        chat.on_agent_event(&AgentEvent::History(vec![
+            ChatMessage::user("上一段对话的问题"),
+            ChatMessage::assistant("上一段对话的回答"),
+        ]));
+        // Switching sessions hands over another history: two conversations in one scroll would be a
+        // transcript nobody could read.
+        chat.on_agent_event(&AgentEvent::History(vec![ChatMessage::user(
+            "换过来的这一句",
+        )]));
+
+        let screen = drawn_lines(&mut chat).join("\n").replace(' ', "");
+        assert!(screen.contains("换过来的这一句"), "{screen}");
+        assert!(!screen.contains("上一段对话"), "{screen}");
     }
 
     #[test]

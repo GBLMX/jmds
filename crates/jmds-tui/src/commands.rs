@@ -49,6 +49,12 @@ pub const COMMANDS: &[Command] = &[
         takes_argument: true,
     },
     Command {
+        name: "resume",
+        usage: "/resume [<id>]",
+        description: "continue another conversation held in this directory",
+        takes_argument: true,
+    },
+    Command {
         name: "prompt",
         usage: "/prompt <name>",
         description: "start the prompt file from a saved template",
@@ -88,6 +94,19 @@ pub fn parse_command(line: &str) -> Option<(&'static Command, &str)> {
     // empty. Everything else is prose that happens to start with a slash.
     let command = Command::find(name)?;
     Some((command, argument))
+}
+
+/// The conversations held in this directory, newest first.
+///
+/// The same rule the app applies when it switches: a session held somewhere else is about files this
+/// conversation cannot see, so it is not offered rather than offered and then refused.
+pub(crate) fn sessions_here() -> Vec<jmds_core::session::Summary> {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    jmds_core::session::list(&jmds_core::paths::sessions_dir())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|summary| summary.header.cwd == cwd)
+        .collect()
 }
 
 /// Candidates for the two prefixes this app has.
@@ -181,6 +200,12 @@ impl Source for SessionSource {
             // The templates are whatever the user has saved, so they are read rather than listed: one
             // they wrote a minute ago belongs in the menu a minute later.
             "prompt" => jmds_core::prompt::templates(),
+            // Conversations held in *this* directory: the ones the app would refuse to switch to are
+            // not worth offering, and the completion is where a person looks for one.
+            "resume" => sessions_here()
+                .into_iter()
+                .map(|summary| summary.header.id)
+                .collect(),
             _ => return Vec::new(),
         };
         values
@@ -331,6 +356,23 @@ mod tests {
         assert!(source.argument("nope", "").is_empty());
         // Every command that takes an argument says what for, and the ones that do not say nothing.
         assert!(Command::find("prompt").is_some_and(|command| command.takes_argument));
+    }
+
+    #[test]
+    fn the_resume_command_offers_the_conversations_held_here() {
+        let source = SessionSource::new(scratch("resume-values"));
+        let offered: Vec<String> = source
+            .argument("resume", "")
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        let here: Vec<String> = sessions_here()
+            .into_iter()
+            .map(|summary| summary.header.id)
+            .collect();
+        assert_eq!(offered, here, "菜单里就是这个目录里的那些会话");
+        // And the values are ids, so a query filters them like any other list.
+        assert!(source.argument("resume", "zzz").is_empty());
     }
 
     #[test]

@@ -162,15 +162,16 @@ async fn resolve(
                 model: model.to_string(),
             });
         }
-        cli::Start::Continue => disk(latest_in(sessions, cwd).await, "读会话目录")?
+        cli::Start::Continue => disk(latest_in(sessions, cwd), "读会话目录")?
             .ok_or_else(|| format!("这个目录里还没有会话可以接着聊：{}", cwd.display()))?,
         cli::Start::Resume(id) => {
-            disk(by_id(sessions, id).await, "读会话")?.ok_or_else(|| format!("找不到会话 {id}"))?
+            disk(by_id(sessions, id), "读会话")?.ok_or_else(|| format!("找不到会话 {id}"))?
         }
         cli::Start::Branch { from, .. } => match from {
-            Some(id) => disk(by_id(sessions, id).await, "读会话")?
-                .ok_or_else(|| format!("找不到会话 {id}"))?,
-            None => disk(latest_in(sessions, cwd).await, "读会话目录")?
+            Some(id) => {
+                disk(by_id(sessions, id), "读会话")?.ok_or_else(|| format!("找不到会话 {id}"))?
+            }
+            None => disk(latest_in(sessions, cwd), "读会话目录")?
                 .ok_or_else(|| format!("这个目录里还没有会话可以分叉：{}", cwd.display()))?,
         },
     };
@@ -234,7 +235,7 @@ async fn session_loop(
     bus: EventBus,
     resolved: Resolved,
 ) -> color_eyre::Result<()> {
-    let (prompts, questions) = mpsc::unbounded_channel::<String>();
+    let (prompts, work) = mpsc::unbounded_channel::<Work>();
     // Built here rather than in the task: the task outlives this borrow, so what it needs is
     // handed over by value. The model is the session's, which for a continued conversation is the
     // one its history came from rather than whatever the config says today.
@@ -259,7 +260,7 @@ async fn session_loop(
         sessions_dir(),
         cwd.clone(),
         resolved.opening,
-        questions,
+        work,
     );
 
     let mut app = App::new();
@@ -351,9 +352,12 @@ async fn session_loop(
                                 quit = true;
                                 break;
                             }
+                            Some(jmds_tui::app::CommandOutcome::Resume(id)) => {
+                                let _ = prompts.send(Work::Resume(id));
+                            }
                             Some(jmds_tui::app::CommandOutcome::Handled) => {}
                             None => {
-                                let _ = prompts.send(line);
+                                let _ = prompts.send(Work::Ask(line));
                             }
                         }
                     }
@@ -415,6 +419,17 @@ async fn session_loop(
 /// Everything it needs is passed by value. It outlives the loop that starts it, so it cannot borrow
 /// the configuration the loop was reading.
 #[allow(clippy::too_many_arguments)]
+/// What the loop asks the conversation task to do.
+///
+/// One channel rather than two, because these are the same kind of thing: something only the one owner
+/// of the history can act on, in the order it arrived.
+enum Work {
+    /// Ask the model something.
+    Ask(String),
+    /// Continue a different session, held in this directory.
+    Resume(String),
+}
+
 fn spawn_conversation(
     bus: EventBus,
     client: Option<Result<Client, jmds_api::ApiError>>,
@@ -424,7 +439,7 @@ fn spawn_conversation(
     sessions: PathBuf,
     cwd: PathBuf,
     opening: Opening,
-    mut questions: mpsc::UnboundedReceiver<String>,
+    mut work: mpsc::UnboundedReceiver<Work>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         // Where this conversation's history lives, and whether it started here. A session that
@@ -489,7 +504,14 @@ fn spawn_conversation(
             // Without a client there is still a conversation to answer: say why, in the transcript,
             // for every question asked. `TurnStarted` first, so the pane stops showing a spinner
             // when the error closes the turn.
-            while let Some(_question) = questions.recv().await {
+            while let Some(work) = work.recv().await {
+                // Switching sessions needs no client: it is a file and a history, not a request. The key
+                // decides whether questions can be *answered*, and someone without one may well want to
+                // read what was said last time.
+                if let Work::Resume(id) = work {
+                    resume_into(&id, &sessions, &cwd, &mut messages, &mut store, &bus).await;
+                    continue;
+                }
                 bus.publish(AgentEvent::TurnStarted {
                     model: model.clone(),
                 });
@@ -507,7 +529,16 @@ fn spawn_conversation(
             AgentConfig::new(model.clone(), system),
         );
 
-        while let Some(question) = questions.recv().await {
+        while let Some(work) = work.recv().await {
+            let question = match work {
+                Work::Ask(question) => question,
+                // A switch happens between turns by construction: this loop runs them one at a time,
+                // so nothing is in flight while the history is being replaced.
+                Work::Resume(id) => {
+                    resume_into(&id, &sessions, &cwd, &mut messages, &mut store, &bus).await;
+                    continue;
+                }
+            };
             // Everything from here on is what this turn added, which is exactly what goes to the
             // file: the human's question, then whatever the loop appended after it. The system
             // message is added by the loop on the first turn, above the mark, so it is written too.
@@ -573,6 +604,68 @@ fn shell_title(shell: &str) -> String {
         .to_string()
 }
 
+/// Continue another session, saying why if it cannot be done.
+///
+/// Used by both loops — the one with a client and the one without — because switching between
+/// conversations is a file operation: it must not depend on whether the model can be reached.
+async fn resume_into(
+    id: &str,
+    sessions: &Path,
+    cwd: &Path,
+    messages: &mut Vec<ChatMessage>,
+    store: &mut Option<SessionFile>,
+    bus: &EventBus,
+) {
+    if let Err(why) = switch_session(id, sessions, cwd, messages, store, bus).await {
+        bus.publish(AgentEvent::Error(why));
+    }
+}
+
+/// Move this conversation to another session: read it, and start appending there.
+///
+/// The rules are the ones starting in a session follows, for the same reasons: a session held in
+/// another directory is refused, because the model would be handed a history about files it cannot
+/// see; and a file that cannot be read leaves the current conversation exactly as it was, rather than
+/// half-switched.
+async fn switch_session(
+    id: &str,
+    sessions: &Path,
+    cwd: &Path,
+    messages: &mut Vec<ChatMessage>,
+    store: &mut Option<SessionFile>,
+    bus: &EventBus,
+) -> Result<(), String> {
+    let summary = by_id(sessions, id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| format!("找不到会话 {id}"))?;
+    if summary.header.cwd != cwd {
+        return Err(format!(
+            "会话 {} 是在 {} 里进行的，不是 {}",
+            summary.id(),
+            summary.header.cwd.display(),
+            cwd.display()
+        ));
+    }
+    let recovered = recover(&summary.path)
+        .await
+        .map_err(|error| format!("读会话内容失败：{error}"))?;
+    let opened = SessionFile::open(&summary.path)
+        .await
+        .map_err(|error| format!("会话文件打不开（{error}）"))?;
+
+    // The store is replaced, not kept: the old file stops being written to the moment this succeeds,
+    // which is what "continue that one instead" means.
+    *messages = recovered.messages();
+    *store = Some(opened);
+    bus.publish(SessionEvent::Restored {
+        id: summary.header.id.clone(),
+    });
+    // The pane is told to start over with what was read: appending to the transcript already on screen
+    // would leave two conversations in one scroll.
+    bus.publish(AgentEvent::History(messages.clone()));
+    Ok(())
+}
+
 /// What the model is told about itself and where it is.
 ///
 /// Short on purpose: what each tool is *for* is in the tool table, which the model is sent anyway,
@@ -616,7 +709,7 @@ mod tests {
     };
     use jmds_tui::{app::App, pane::files::FileTree};
 
-    use super::{Opening, cli, resolve};
+    use super::{Opening, Work, cli, resolve, spawn_conversation, switch_session};
     use crate::PaneId;
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
     use jmds_core::pty::Run;
@@ -823,6 +916,106 @@ mod tests {
         ];
         std::fs::write(&path, lines.join("\n") + "\n").unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn a_switch_needs_no_api_key() {
+        // The bug this pins, found by running the thing: with no key in the environment, switching
+        // sessions was refused with "no client" — the guard meant for questions, applied to a file
+        // operation. Someone without a key may still want to read what was said last time.
+        let dir = std::env::temp_dir().join(format!("jmds-switch-nokey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        session_file(&dir, "700-0", &dir);
+
+        let bus = EventBus::new(64);
+        let mut events = bus.subscribe();
+        let (prompts, work) = tokio::sync::mpsc::unbounded_channel();
+        let conversation = spawn_conversation(
+            bus.clone(),
+            None,
+            "deepseek-chat".to_string(),
+            "DEEPSEEK_API_KEY".to_string(),
+            "system".to_string(),
+            dir.clone(),
+            dir.clone(),
+            Opening::New,
+            work,
+        );
+        prompts
+            .send(Work::Resume("700-0".to_string()))
+            .expect("任务还在");
+
+        let mut switched = false;
+        let mut errors: Vec<String> = Vec::new();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline && !switched {
+            match events.try_recv() {
+                Ok(Event::Agent(AgentEvent::History(_))) => switched = true,
+                Ok(Event::Agent(AgentEvent::Error(why))) => errors.push(why),
+                Ok(_) => {}
+                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
+            }
+        }
+        assert!(switched, "没有 key 也该换得过去：{errors:?}");
+        assert!(errors.is_empty(), "更不该报错：{errors:?}");
+        conversation.abort();
+    }
+
+    #[tokio::test]
+    async fn switching_sessions_replaces_the_history_and_the_file() {
+        let dir = std::env::temp_dir().join(format!("jmds-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = session_file(&dir, "700-0", &dir);
+
+        let bus = EventBus::new(64);
+        let mut events = bus.subscribe();
+        let mut messages: Vec<jmds_api::ChatMessage> = Vec::new();
+        let mut store = None;
+
+        switch_session("700-0", &dir, &dir, &mut messages, &mut store, &bus)
+            .await
+            .expect("这个世界里会话是有的");
+
+        assert_eq!(messages.len(), 2, "读回来的是它的历史");
+        assert_eq!(
+            store.expect("也要接着往那个文件里写").path(),
+            target,
+            "并且是这一个文件"
+        );
+        let published: Vec<String> = std::iter::from_fn(|| events.try_recv().ok())
+            .map(|event| format!("{event:?}"))
+            .collect();
+        assert!(
+            published.iter().any(|event| event.contains("Restored")),
+            "{published:?}"
+        );
+        assert!(
+            published.iter().any(|event| event.contains("History")),
+            "面板也要被告知换了一段对话：{published:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn switching_to_a_session_from_another_directory_is_refused_and_changes_nothing() {
+        let dir =
+            std::env::temp_dir().join(format!("jmds-switch-elsewhere-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        session_file(&dir, "700-0", std::path::Path::new("/somewhere/else"));
+
+        let bus = EventBus::new(64);
+        let mut messages: Vec<jmds_api::ChatMessage> =
+            vec![jmds_api::ChatMessage::user("还说着一半的话")];
+        let mut store = None;
+
+        let error = switch_session("700-0", &dir, &dir, &mut messages, &mut store, &bus)
+            .await
+            .expect_err("别人的项目不该接上");
+        assert!(error.contains("/somewhere/else"), "{error}");
+        assert_eq!(messages.len(), 1, "半路失败不该把现在这段也弄丢");
+        assert!(store.is_none(), "也没有换到另一个文件上");
     }
 
     #[tokio::test]

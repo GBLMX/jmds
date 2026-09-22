@@ -71,6 +71,28 @@ impl Default for App {
     }
 }
 
+/// How many sessions `/resume` lists before it stops. A list longer than the pane is a list nobody
+/// reads, and `/resume <id>` is for when the person already knows which one.
+const SESSION_LIST_LIMIT: usize = 10;
+
+/// How long ago something started, in words.
+///
+/// Coarse on purpose: the question a list of conversations answers is "which one was that", and the
+/// difference between nineteen minutes and twenty does not change the answer.
+fn ago(started_at_ms: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as u64)
+        .unwrap_or(0);
+    let minutes = now.saturating_sub(started_at_ms) / 60_000;
+    match minutes {
+        0 => "刚刚".to_string(),
+        1..=59 => format!("{minutes} 分钟前"),
+        60..=1439 => format!("{} 小时前", minutes / 60),
+        _ => format!("{} 天前", minutes / 1440),
+    }
+}
+
 /// Where a pointer is, as the ratio that puts a split's line under it.
 ///
 /// Taken as-is rather than with the slop `split_at` allows: the slop is there so a press near the
@@ -338,6 +360,33 @@ impl App {
             .find(|id| self.host.pane(*id).map(|pane| pane.kind()) == Some(kind))
     }
 
+    /// What `/resume` with no argument says: the conversations held here, newest first.
+    ///
+    /// Ids rather than titles, because a session has no title: what it has is a start time and a model,
+    /// and the id is what `/resume` takes back. Only the newest few — a list longer than the pane is a
+    /// list nobody reads, and `/resume <id>` is for when the person already knows which one.
+    fn list_sessions(&mut self) {
+        let here = crate::commands::sessions_here();
+        if here.is_empty() {
+            self.host.note("这个目录里还没有别的会话");
+            return;
+        }
+        let lines: Vec<String> = here
+            .into_iter()
+            .take(SESSION_LIST_LIMIT)
+            .map(|summary| {
+                format!(
+                    "{}  {}  {}",
+                    summary.id(),
+                    summary.header.model,
+                    ago(summary.header.started_at_ms)
+                )
+            })
+            .collect();
+        self.host
+            .note(&format!("/resume <id>\n{}", lines.join("\n")));
+    }
+
     /// Start the prompt file from a saved template.
     ///
     /// The template is written *into* the file the editor is holding rather than opened as a buffer of
@@ -404,6 +453,13 @@ impl App {
             "clear" => self.host.clear(),
             "theme" => self.set_theme(argument),
             "prompt" => self.load_prompt(argument),
+            "resume" => {
+                if argument.is_empty() {
+                    self.list_sessions();
+                } else {
+                    return Some(CommandOutcome::Resume(argument.to_string()));
+                }
+            }
             "glyphs" => self.set_glyphs(argument),
             _ => {}
         }
@@ -474,12 +530,15 @@ fn unknown_command_name(line: &str) -> Option<&str> {
 }
 
 /// What a command line meant, once the app has run it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CommandOutcome {
     /// The app did it. Nothing goes to the model.
     Handled,
     /// The line asked the app to stop.
     Quit,
+    /// The line asked for another conversation. The app cannot switch one itself — the history has one
+    /// owner, and it is not this — so it hands the id back for whoever does own it.
+    Resume(String),
 }
 
 /// What `/help` says. Short, because a help screen nobody reads is a help screen that does not
@@ -488,6 +547,7 @@ const HELP: &str = "\
 /help                    this
 /clear                   empty the transcript; the session file stays
 /theme <name>            switch colours
+/resume [<id>]           continue another conversation held here; alone, list them
 /prompt <name>           start the prompt file from a saved template
 /glyphs unicode|ascii    which glyph set to draw with
 /quit                    leave
@@ -864,6 +924,20 @@ mod tests {
         for (index, log) in logs.iter().enumerate() {
             assert_eq!(log.borrow().scrolled, 0, "第 {} 个面板不该动", index + 1);
         }
+    }
+
+    #[test]
+    fn resume_hands_the_id_back_to_whoever_owns_the_history() {
+        let (mut app, _) = app_with_recorder();
+        // The app cannot switch a conversation: the history has one owner and it is not this one, so
+        // the id goes back out through the outcome the loop reads.
+        assert_eq!(
+            app.handle_command("/resume 700-0"),
+            Some(CommandOutcome::Resume("700-0".to_string()))
+        );
+        // With no id it answers instead of handing anything over: a list, or that there is nothing to
+        // list here.
+        assert_eq!(app.handle_command("/resume"), Some(CommandOutcome::Handled));
     }
 
     #[test]

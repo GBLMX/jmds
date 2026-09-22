@@ -264,13 +264,15 @@ impl Summary {
 /// Read a session file's header line and nothing else.
 ///
 /// Cheap on purpose: choosing a session means looking at every candidate, and reading whole files to
-/// choose one would make the choice cost more than the thing chosen.
-pub async fn summary(path: &Path) -> std::io::Result<Summary> {
-    use tokio::io::AsyncBufReadExt;
+/// choose one would make the choice cost more than the thing chosen. Synchronous for the same reason
+/// — it is a directory listing and a few short reads, and the callers are a menu that has to answer
+/// *now* as much as a startup that could wait.
+pub fn summary(path: &Path) -> std::io::Result<Summary> {
+    use std::io::BufRead;
 
-    let file = tokio::fs::File::open(path).await?;
-    let mut lines = tokio::io::BufReader::new(file).lines();
-    while let Some(raw) = lines.next_line().await? {
+    let file = std::fs::File::open(path)?;
+    for raw in std::io::BufReader::new(file).lines() {
+        let raw = raw?;
         if raw.trim().is_empty() {
             continue;
         }
@@ -296,21 +298,21 @@ pub async fn summary(path: &Path) -> std::io::Result<Summary> {
 /// Ordering is by id, which starts with the unix millisecond the session was created at: that is
 /// what "which conversation is the latest" asks, it costs no `stat`, and it does not move when an
 /// old session is reopened — reopening a conversation does not make it new.
-pub async fn list(dir: &Path) -> std::io::Result<Vec<Summary>> {
-    let mut entries = match tokio::fs::read_dir(dir).await {
+pub fn list(dir: &Path) -> std::io::Result<Vec<Summary>> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error),
     };
     let mut summaries = Vec::new();
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
+    for entry in entries {
+        let path = entry?.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("jsonl") {
             continue;
         }
         // One file that is not a session — a stray `.jsonl`, a session that never got a header —
         // is skipped rather than fatal: a bad file should not hide every good one.
-        if let Ok(summary) = summary(&path).await {
+        if let Ok(summary) = summary(&path) {
             summaries.push(summary);
         }
     }
@@ -319,8 +321,8 @@ pub async fn list(dir: &Path) -> std::io::Result<Vec<Summary>> {
 }
 
 /// One session by id, from `dir`.
-pub async fn by_id(dir: &Path, id: &str) -> std::io::Result<Option<Summary>> {
-    match summary(&dir.join(format!("{id}.jsonl"))).await {
+pub fn by_id(dir: &Path, id: &str) -> std::io::Result<Option<Summary>> {
+    match summary(&dir.join(format!("{id}.jsonl"))) {
         Ok(summary) => Ok(Some(summary)),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
         Err(error) => Err(error),
@@ -332,9 +334,8 @@ pub async fn by_id(dir: &Path, id: &str) -> std::io::Result<Option<Summary>> {
 /// Resuming another project's conversation is worse than resuming nothing: the model would be handed
 /// a history about files it cannot see. So the working directory has to match, and sessions that do
 /// not are skipped rather than offered.
-pub async fn latest_in(dir: &Path, cwd: &Path) -> std::io::Result<Option<Summary>> {
-    Ok(list(dir)
-        .await?
+pub fn latest_in(dir: &Path, cwd: &Path) -> std::io::Result<Option<Summary>> {
+    Ok(list(dir)?
         .into_iter()
         .find(|summary| summary.header.cwd == cwd))
 }
@@ -412,7 +413,7 @@ mod tests {
         // A half-written line after the header is exactly the state a crashed session is in.
         std::fs::write(&path, format!("{header}\nnot json at all\n")).unwrap();
 
-        let summary = summary(&path).await.expect("一个头");
+        let summary = summary(&path).expect("一个头");
         assert_eq!(summary.id(), "77-0");
         assert_eq!(summary.header.cwd, PathBuf::from("/w"));
     }
@@ -422,10 +423,10 @@ mod tests {
         let dir = scratch("stray-jsonl");
         let strange = dir.join("notes.jsonl");
         std::fs::write(&strange, "not json at all\n").unwrap();
-        assert!(summary(&strange).await.is_err());
+        assert!(summary(&strange).is_err());
 
         session(&dir, "100-0", "/w").await;
-        let listed = list(&dir).await.unwrap();
+        let listed = list(&dir).unwrap();
         assert_eq!(listed.len(), 1, "坏文件不该把好文件一起藏起来");
         assert_eq!(listed[0].id(), "100-0");
     }
@@ -439,7 +440,6 @@ mod tests {
         std::fs::write(dir.join("notes.txt"), "x").unwrap();
 
         let ids: Vec<String> = list(&dir)
-            .await
             .unwrap()
             .into_iter()
             .map(|summary| summary.header.id)
@@ -454,7 +454,6 @@ mod tests {
         session(&dir, "100-0", "/w").await;
 
         let ids: Vec<String> = list(&dir)
-            .await
             .unwrap()
             .into_iter()
             .map(|summary| summary.header.id)
@@ -470,15 +469,11 @@ mod tests {
         session(&dir, "200-0", "/project/b").await;
 
         let found = latest_in(&dir, Path::new("/project/a"))
-            .await
             .unwrap()
             .expect("a 项目的会话");
         assert_eq!(found.id(), "100-0");
         assert!(
-            latest_in(&dir, Path::new("/project/c"))
-                .await
-                .unwrap()
-                .is_none(),
+            latest_in(&dir, Path::new("/project/c")).unwrap().is_none(),
             "没在这个项目里聊过，就没有可接的话"
         );
     }
@@ -488,11 +483,8 @@ mod tests {
         let dir = scratch("by-id");
         session(&dir, "42-7", "/w").await;
 
-        assert_eq!(
-            by_id(&dir, "42-7").await.unwrap().expect("找到了").id(),
-            "42-7"
-        );
-        assert!(by_id(&dir, "nope").await.unwrap().is_none());
+        assert_eq!(by_id(&dir, "42-7").unwrap().expect("找到了").id(), "42-7");
+        assert!(by_id(&dir, "nope").unwrap().is_none());
     }
 
     fn header(id: &str) -> Header {

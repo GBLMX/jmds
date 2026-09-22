@@ -45,12 +45,14 @@ fn filter(level: Level) -> LevelFilter {
 
 /// Where the log goes: the current directory in a debug build (so a developer sees it appear next
 /// to the code), the config directory in a release build.
+/// Where the log files go.
+///
+/// Under the config directory, beside the sessions and the prompts, in every build. It used to be the
+/// working directory for debug builds, which is where a log is *least* wanted: the app is normally run
+/// from the project being worked on, so the log lands in it, shows up in the file tree as something
+/// that just changed, and is one `git add -A` away from being committed.
 fn log_dir() -> PathBuf {
-    if cfg!(debug_assertions) {
-        PathBuf::from(".")
-    } else {
-        config_dir()
-    }
+    config_dir().join("logs")
 }
 
 /// Install the subscriber. Called once, before anything that logs.
@@ -79,6 +81,15 @@ pub fn init_logger(config: &Config) -> color_eyre::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_log_lives_under_the_config_directory_and_not_in_the_working_directory() {
+        // The failure this prevents: a project with a `debug.log.<date>` in it, appearing in the file
+        // tree as something that just changed, one `git add -A` from being in a commit.
+        let dir = log_dir();
+        assert!(dir.starts_with(crate::paths::config_dir()), "{dir:?}");
+        assert_ne!(dir, PathBuf::from("."));
+    }
 
     #[test]
     fn every_level_maps_to_its_own_filter() {
