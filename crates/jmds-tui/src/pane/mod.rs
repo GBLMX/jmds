@@ -172,6 +172,9 @@ pub struct PaneHost {
     /// Panes that have closed since the last frame, as the news their commands need. Kept apart
     /// from what the panes themselves say because a closed pane has nothing left to say with.
     closing: Vec<PtyEvent>,
+    /// The rectangle the last frame was drawn into. A split line is found by walking the tree with
+    /// it, and only the caller of `draw` knows it.
+    last_area: Rect,
 }
 
 impl Default for PaneHost {
@@ -193,6 +196,7 @@ impl PaneHost {
             geometry: Vec::new(),
             theme,
             closing: Vec::new(),
+            last_area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -334,6 +338,10 @@ impl PaneHost {
 
     /// Draw every pane, borders and titles included, and remember where each one landed.
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+        // Kept because a split line is found by walking the tree with the frame's rectangle, and the
+        // tree does not know how big the screen is: the layout is a shape, and the frame it lands in
+        // is the caller's.
+        self.last_area = area;
         self.geometry = self.tree.rects(to_pane_rect(area));
         let focused = self.tree.focused_id();
 
@@ -448,6 +456,24 @@ impl PaneHost {
             events.extend(pane.take_pty());
         }
         events
+    }
+
+    /// The split line that holds a pane: which way it runs, where it is, and the rectangle it
+    /// divides. The area is the last frame's, which is why this is the host's question and not the
+    /// tree's.
+    pub fn split_of(&self, id: PaneId) -> Option<jmds_core::pane::SplitUnder> {
+        self.tree.split_of(id, to_pane_rect(self.last_area))
+    }
+
+    /// The split line at this cell of the last frame, if one is there.
+    pub fn split_at(&mut self, column: u16, row: u16) -> Option<jmds_core::pane::SplitUnder> {
+        self.tree
+            .split_at(to_pane_rect(self.last_area), column, row)
+    }
+
+    /// Move the split line that holds a pane. Clamped by the tree, so no pane is squeezed away.
+    pub fn set_ratio(&mut self, id: PaneId, ratio: f32) -> bool {
+        self.tree.set_ratio(id, ratio)
     }
 
     /// Send the wheel to one pane.

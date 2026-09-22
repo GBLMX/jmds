@@ -95,14 +95,16 @@ const BRACKETED_PASTE_OFF: &[u8] = b"\x1b[?2004l";
 /// `CSI > 1 u` pushes kitty keyboard flag 1; `CSI < 1 u` pops it again.
 const PUSH_DISAMBIGUATE_ESCAPE_CODES: &[u8] = b"\x1b[>1u";
 const POP_KEYBOARD_ENHANCEMENT_FLAGS: &[u8] = b"\x1b[<1u";
-/// `CSI ? 1000 h` asks for button events, `CSI ? 1006 h` asks for them in SGR form.
+/// `CSI ? 1000 h` asks for button events, `CSI ? 1002 h` for motion while a button is held, and
+/// `CSI ? 1006 h` for both in SGR coordinates.
 ///
-/// Both halves are needed. Without 1000 the terminal sends nothing; without 1006 the coordinates
-/// arrive in a form that mixes them into a single byte and stops working past column 223, which is
-/// a bug that only shows up on wide screens. Motion reporting (1002) is deliberately not asked for:
-/// it would turn every mouse move into a wakeup, and nothing here does anything with a move — yet.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1006h";
-const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1000l";
+/// All three are needed. Without 1000 the terminal sends nothing; without 1002 a drag arrives as a
+/// press and a release with nothing in between, so a split line could be grabbed but not moved;
+/// without 1006 the coordinates are packed into a single byte and stop working past column 223,
+/// which is a bug that only shows up on wide screens. `1002` and not `1003`: motion *while held* is
+/// a drag, and motion at all times would turn every mouse move into a wakeup.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 
 /// Put the terminal into the modes the UI relies on, and take them back out again.
 ///

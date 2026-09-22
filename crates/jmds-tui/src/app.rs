@@ -24,7 +24,10 @@
 //! close, cycle, jump — so the app takes them and the pane gets everything else.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
-use jmds_core::{event::AgentEvent, pane::Axis};
+use jmds_core::{
+    event::AgentEvent,
+    pane::{Axis, SplitUnder},
+};
 use ratatui::{buffer::Buffer, layout::Rect};
 
 use crate::{
@@ -43,6 +46,12 @@ pub enum Action {
 /// The panes, and the keys that belong to the app rather than to them.
 pub struct App {
     host: PaneHost,
+    /// The split line a drag is moving, if a drag is happening.
+    ///
+    /// Kept here rather than asked for on every motion event: what a drag means is "the line it
+    /// started on", and asking again would let a pointer that wandered onto another line start
+    /// moving *that* one mid-drag.
+    dragging: Option<SplitUnder>,
 }
 
 impl Default for App {
@@ -51,10 +60,29 @@ impl Default for App {
     }
 }
 
+/// Where a pointer is, as the ratio that puts a split's line under it.
+///
+/// Taken as-is rather than with the slop `split_at` allows: the slop is there so a press near the
+/// line starts a drag, and using it here would move the line the moment the drag began.
+fn ratio_at(split: &SplitUnder, column: u16, row: u16) -> f32 {
+    let (pointer, start, span) = match split.axis {
+        Axis::Horizontal => (column, split.area.x, split.area.width),
+        Axis::Vertical => (row, split.area.y, split.area.height),
+    };
+    if span == 0 {
+        return 0.5;
+    }
+    (pointer.saturating_sub(start) as f32 / span as f32).clamp(0.0, 1.0)
+}
+
+/// How far one `Alt+arrow` moves a line. Small enough to be a nudge, big enough to see.
+const RESIZE_STEP: f32 = 0.03;
+
 impl App {
     pub fn new() -> Self {
         Self {
             host: PaneHost::new(),
+            dragging: None,
         }
     }
 
@@ -97,13 +125,47 @@ impl App {
     pub fn on_mouse(&mut self, mouse: MouseEvent) -> Action {
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                if let Some(id) = self.host.pane_at(mouse.column, mouse.row) {
-                    self.host.focus(id);
+                // A press on a split line starts moving it; anywhere else it is a click, which is how
+                // the keyboard is handed over.
+                match self.host.split_at(mouse.column, mouse.row) {
+                    Some(split) => self.dragging = Some(split),
+                    None => {
+                        if let Some(id) = self.host.pane_at(mouse.column, mouse.row) {
+                            self.host.focus(id);
+                        }
+                    }
                 }
             }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let Some(split) = self.dragging {
+                    let ratio = ratio_at(&split, mouse.column, mouse.row);
+                    self.host.set_ratio(split.pane, ratio);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => self.dragging = None,
             MouseEventKind::ScrollUp => self.scroll_at(&mouse, 1),
             MouseEventKind::ScrollDown => self.scroll_at(&mouse, -1),
             _ => {}
+        }
+        Action::Continue
+    }
+
+    /// Move the focused pane's own split line by `step`, if the key's direction is the way it runs.
+    ///
+    /// The line moves the way the arrow points, exactly as it does under a drag: the ratio *is* the
+    /// line's position, so both hands do the same thing to it. A key whose direction does not match
+    /// the line does nothing rather than moving a line the person is not looking at — `Alt+Left` on a
+    /// pane split top-and-bottom has nothing to say about it, and inventing something would be a key
+    /// that moves an invisible thing.
+    fn nudge(&mut self, step: f32, axis: Axis) -> Action {
+        let Some(id) = self.host.focused_id() else {
+            return Action::Continue;
+        };
+        let Some(split) = self.host.split_of(id) else {
+            return Action::Continue;
+        };
+        if split.axis == axis {
+            self.host.set_ratio(id, split.ratio + step);
         }
         Action::Continue
     }
@@ -122,7 +184,14 @@ impl App {
     /// The keys the app answers itself, and the only place a pane can be closed from.
     fn app_key(&mut self, key: KeyEvent) -> Option<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
+            // `Alt+arrow` moves the focused pane's split line, the way `Alt+digit` jumps between
+            // panes: the app's own keys, and ones a pane has no use for.
+            KeyCode::Left if alt => Some(self.nudge(-RESIZE_STEP, Axis::Horizontal)),
+            KeyCode::Right if alt => Some(self.nudge(RESIZE_STEP, Axis::Horizontal)),
+            KeyCode::Up if alt => Some(self.nudge(-RESIZE_STEP, Axis::Vertical)),
+            KeyCode::Down if alt => Some(self.nudge(RESIZE_STEP, Axis::Vertical)),
             KeyCode::Char('q') if control => Some(Action::Quit),
             KeyCode::Char('w') if control => {
                 match self.host.focused_id() {
@@ -455,6 +524,63 @@ mod tests {
 
     fn control(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn dragging_a_split_line_moves_it_and_a_release_lets_it_go() {
+        let (mut app, _) = app_with_three_logs();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buffer = Buffer::empty(area);
+        let (_, second) = app.host().geometry()[1];
+        let (line, row) = (second.x, second.y + 1);
+
+        // A press on the line grabs it; anywhere else it would be a click, which is how the keyboard
+        // is handed over.
+        app.on_mouse(mouse(MouseEventKind::Down(MouseButton::Left), line, row));
+        app.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 45, row));
+        app.on_mouse(mouse(MouseEventKind::Up(MouseButton::Left), 45, row));
+        app.draw(area, &mut buffer);
+        assert_eq!(app.host().geometry()[0].1.width, 45, "线跟着指针走到了 45");
+
+        // After the release the line is nobody's: dragging on does nothing.
+        app.on_mouse(mouse(MouseEventKind::Drag(MouseButton::Left), 10, row));
+        app.draw(area, &mut buffer);
+        assert_eq!(app.host().geometry()[0].1.width, 45);
+    }
+
+    #[test]
+    fn alt_arrows_move_the_focused_panes_own_line() {
+        let (mut app, _) = app_with_three_logs();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buffer = Buffer::empty(area);
+        let focused = app.host().focused_id().expect("有个焦点");
+        let size = |app: &App| {
+            app.host()
+                .geometry()
+                .iter()
+                .find(|(id, _)| *id == focused)
+                .map(|(_, rect)| (rect.width, rect.height))
+                .expect("每个面板都有自己的矩形")
+        };
+
+        let (width, height) = size(&app);
+        // The line moves the way the arrow points, so a pane on the left of it grows and a pane on
+        // the right shrinks — the same thing a drag does.
+        assert!(!app.host().geometry().is_empty());
+        app.on_key(alt(KeyCode::Right));
+        app.draw(area, &mut buffer);
+        let (moved, taller) = size(&app);
+        assert_ne!(moved, width, "Alt+→ 该动那条线：{width} -> {moved}");
+        assert_eq!(taller, height, "竖着的方向不碰横着的那条线");
+
+        // An arrow across the line does nothing, rather than moving a line the person is not looking
+        // at: this pane's line runs left-to-right, so up-and-down has nothing to say about it.
+        app.on_key(alt(KeyCode::Down));
+        app.draw(area, &mut buffer);
+        assert_eq!(size(&app), (moved, taller), "跨方向的箭头什么都不做");
+        app.on_key(alt(KeyCode::Left));
+        app.draw(area, &mut buffer);
+        assert_eq!(size(&app).0, width, "Alt+← 把它放回去");
     }
 
     fn alt(code: KeyCode) -> KeyEvent {

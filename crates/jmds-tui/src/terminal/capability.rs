@@ -214,8 +214,8 @@ mod terminal_mode_tests {
         enable_terminal_modes(&mut out).expect("enable");
         assert_eq!(
             String::from_utf8(out).expect("utf8"),
-            "\u{1b}[?2004h\u{1b}[>1u\u{1b}[?1000h\u{1b}[?1006h",
-            "paste on, keyboard protocol with disambiguation, then the mouse in SGR coordinates"
+            "\u{1b}[?2004h\u{1b}[>1u\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1006h",
+            "paste on, keyboard protocol, then the mouse: buttons, drags, SGR coordinates"
         );
 
         let mut out = Vec::new();
@@ -225,7 +225,7 @@ mod terminal_mode_tests {
         // alternate screen: the main and alternate screens keep separate stacks.
         assert_eq!(
             String::from_utf8(out).expect("utf8"),
-            "\u{1b}[?2004l\u{1b}[<1u\u{1b}[?1006l\u{1b}[?1000l",
+            "\u{1b}[?2004l\u{1b}[<1u\u{1b}[?1006l\u{1b}[?1002l\u{1b}[?1000l",
             "paste off, keyboard protocol popped, mouse let go"
         );
     }

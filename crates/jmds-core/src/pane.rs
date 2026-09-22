@@ -174,6 +174,22 @@ impl Rect {
     }
 }
 
+/// A split line under a point, with what a caller needs to move it there.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SplitUnder {
+    /// A pane in the split. [`PaneTree::set_ratio`] moves the deepest split that contains a pane,
+    /// which for a pane that is *in* this split is this split.
+    pub pane: PaneId,
+    /// Which way the line runs.
+    pub axis: Axis,
+    /// The rectangle the line divides: a pointer's position inside it is the ratio that puts the line
+    /// under the pointer.
+    pub area: Rect,
+    /// How much of the axis the first half gets right now. A key that nudges the line needs to know
+    /// where it is, and which half a pane is in decides which way "wider" is.
+    pub ratio: f32,
+}
+
 /// One node of the split tree.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PaneNode {
@@ -268,6 +284,94 @@ impl PaneNode {
                 }
             }
         }
+    }
+
+    /// One pane in this subtree: what a split is named by, for callers that only need to point at it.
+    fn any_leaf(&self) -> Option<PaneId> {
+        match self {
+            Self::Leaf(id) => Some(*id),
+            Self::Split { first, second, .. } => first.any_leaf().or_else(|| second.any_leaf()),
+        }
+    }
+
+    /// The split line at this cell, if one is there.
+    ///
+    /// A line is one cell wide, which is a hard target for a pointer, so the cell on *either* side of
+    /// it counts: dragging is meant to be forgiving, and the cost of a near miss is a resize that
+    /// does not start rather than one that moves the wrong line.
+    ///
+    /// The perpendicular coordinate has to be inside the split, so where two lines meet the answer is
+    /// the outer one — the line whose axis the pointer is *along*, which is the one a drag there
+    /// means.
+    fn split_at(&self, area: Rect, x: u16, y: u16) -> Option<SplitUnder> {
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        let (a, b) = area.split(*axis, *ratio);
+        let along = match axis {
+            Axis::Horizontal => y.wrapping_sub(area.y) < area.height,
+            Axis::Vertical => x.wrapping_sub(area.x) < area.width,
+        };
+        if along {
+            // `b`'s first cell is the line; the cell before it is the other half of the same target.
+            let line = match axis {
+                Axis::Horizontal => b.x,
+                Axis::Vertical => b.y,
+            };
+            let pointer = match axis {
+                Axis::Horizontal => x,
+                Axis::Vertical => y,
+            };
+            if pointer == line || pointer + 1 == line {
+                return Some(SplitUnder {
+                    pane: first.any_leaf()?,
+                    axis: *axis,
+                    area,
+                    ratio: *ratio,
+                });
+            }
+        }
+        if a.contains(x, y) {
+            first.split_at(a, x, y)
+        } else if b.contains(x, y) {
+            second.split_at(b, x, y)
+        } else {
+            None
+        }
+    }
+
+    /// The deepest split that holds `id`, described the way a moved line is.
+    fn split_of(&self, id: PaneId, area: Rect) -> Option<SplitUnder> {
+        let Self::Split {
+            axis,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return None;
+        };
+        if !(first.contains(id) || second.contains(id)) {
+            return None;
+        }
+        let (a, b) = area.split(*axis, *ratio);
+        first
+            .split_of(id, a)
+            .or_else(|| second.split_of(id, b))
+            .or({
+                Some(SplitUnder {
+                    pane: first.any_leaf()?,
+                    axis: *axis,
+                    area,
+                    ratio: *ratio,
+                })
+            })
     }
 
     /// Set the ratio of the *deepest* split that still contains `id` — the one between it and its
@@ -522,6 +626,23 @@ impl PaneTree {
         self.focus
     }
 
+    /// The split line at this cell of `area`, if one is there.
+    ///
+    /// The area is passed in rather than kept, because the tree does not know how big the screen is:
+    /// the layout is a shape, and the frame it is drawn into is the caller's.
+    pub fn split_at(&self, area: Rect, x: u16, y: u16) -> Option<SplitUnder> {
+        self.root.as_ref()?.split_at(area, x, y)
+    }
+
+    /// The axis and ratio of the deepest split that holds `id`.
+    ///
+    /// What a keyboard resize needs: the line to move, which way it runs, and where it is now. A key
+    /// that does not match the axis has nothing to move, and saying so beats moving a line the person
+    /// is not looking at.
+    pub fn split_of(&self, id: PaneId, area: Rect) -> Option<SplitUnder> {
+        self.root.as_ref()?.split_of(id, area)
+    }
+
     /// Set the ratio of the split that holds `id`. Clamped, so no pane can be squeezed away.
     pub fn set_ratio(&mut self, id: PaneId, ratio: f32) -> bool {
         match self.root.as_mut() {
@@ -602,6 +723,96 @@ mod tests {
                 assert!(disjoint, "panes overlap: {a:?} and {b:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_lone_pane_has_no_line_to_drag() {
+        let mut tree = PaneTree::new();
+        tree.insert(id(1), Axis::Horizontal);
+        assert_eq!(tree.split_at(Rect::new(0, 0, 40, 10), 20, 5), None);
+    }
+
+    #[test]
+    fn the_line_between_two_panes_is_found_on_both_of_its_cells() {
+        let mut tree = PaneTree::new();
+        tree.insert(id(1), Axis::Horizontal);
+        tree.split(id(1), id(2), Axis::Horizontal);
+        let area = Rect::new(0, 0, 40, 10);
+
+        // Half of 40 is 20, so the second pane starts at column 20 and the line is 19 and 20: a
+        // one-cell target is a hard thing to hit with a pointer, and a near miss that starts no drag
+        // is better than one that moves the wrong line.
+        let before = tree.split_at(area, 19, 5).expect("线在 19");
+        let on = tree.split_at(area, 20, 5).expect("线也在 20");
+        assert_eq!(before, on);
+        assert_eq!(on.axis, Axis::Horizontal);
+        assert_eq!(on.area, area);
+        // A cell in the middle of a pane is not a line, and neither is one outside the area.
+        assert_eq!(tree.split_at(area, 10, 5), None);
+        assert_eq!(tree.split_at(area, 99, 5), None);
+    }
+
+    #[test]
+    fn where_two_lines_meet_the_answer_is_the_outer_one() {
+        // `[ A | B-over-C ]`: the outer line runs the full height, the inner one only beside B.
+        let mut tree = PaneTree::new();
+        tree.insert(id(1), Axis::Horizontal);
+        tree.split(id(1), id(2), Axis::Horizontal);
+        tree.split(id(2), id(3), Axis::Vertical);
+        let area = Rect::new(0, 0, 40, 10);
+
+        // On the meeting cell: the outer line, because the pointer is along it.
+        let meeting = tree.split_at(area, 20, 5).expect("外线");
+        assert_eq!(meeting.axis, Axis::Horizontal);
+        assert_eq!(meeting.area, area, "外线分的是整块");
+        // Above it, still on that column: the outer line as well.
+        assert_eq!(
+            tree.split_at(area, 20, 1).expect("还是外线").axis,
+            Axis::Horizontal
+        );
+        // The inner line is found beside B, on its own row, and it divides only B's half.
+        let inner = tree.split_at(area, 30, 5).expect("内线");
+        assert_eq!(inner.axis, Axis::Vertical);
+        assert_eq!(inner.area, Rect::new(20, 0, 20, 10));
+    }
+
+    #[test]
+    fn the_line_a_drag_finds_is_the_line_that_moves() {
+        let mut tree = PaneTree::new();
+        tree.insert(id(1), Axis::Horizontal);
+        tree.split(id(1), id(2), Axis::Horizontal);
+        tree.split(id(2), id(3), Axis::Vertical);
+        let area = Rect::new(0, 0, 40, 10);
+
+        let inner = tree.split_at(area, 30, 5).expect("内线");
+        assert_eq!(inner.ratio, 0.5, "刚分出来是一半");
+        assert!(tree.set_ratio(inner.pane, 0.25));
+        let rects = tree.rects(area);
+        let height = |pane: PaneId| {
+            rects
+                .iter()
+                .find(|(held, _)| *held == pane)
+                .map(|(_, rect)| rect.height)
+                .expect("每个面板都有自己的矩形")
+        };
+        // A quarter of ten rows rounds to three.
+        assert_eq!(height(id(2)), 3, "B 矮了");
+        assert_eq!(height(id(3)), 7, "C 高了");
+        assert_eq!(height(id(1)), 10, "外线没被动");
+
+        // And the outer line, when that is what a drag found, moves the full-height one.
+        let outer = tree.split_at(area, 20, 1).expect("外线");
+        assert!(tree.set_ratio(outer.pane, 0.5));
+        let rects = tree.rects(area);
+        let width = |pane: PaneId| {
+            rects
+                .iter()
+                .find(|(held, _)| *held == pane)
+                .map(|(_, rect)| rect.width)
+                .expect("每个面板都有自己的矩形")
+        };
+        assert_eq!(width(id(1)), 20);
+        assert_eq!(width(id(2)), 20);
     }
 
     #[test]
