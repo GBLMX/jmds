@@ -13,6 +13,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::complete::{Item, Prefix, Source};
+use crate::theme::Theme;
 
 /// One command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,10 +160,31 @@ impl SessionSource {
 }
 
 impl Source for SessionSource {
+    /// The values a command takes.
+    ///
+    /// Short lists that live with the thing they name: a theme's names are the theme's business, and
+    /// the glyph sets are the renderer's. Both are offered the same way, so `/theme dr` and
+    /// `/glyphs un` are completed by the same mechanism that completes `/th`.
+    fn argument(&self, command: &str, query: &str) -> Vec<Item> {
+        let values: &[&str] = match command {
+            "theme" => Theme::NAMES,
+            "glyphs" => &["unicode", "ascii"],
+            _ => return Vec::new(),
+        };
+        values
+            .iter()
+            .filter(|value| value.starts_with(query))
+            .map(|value| Item::new(*value))
+            .collect()
+    }
+
     fn candidates(&self, prefix: Prefix, query: &str) -> Vec<Item> {
         match prefix {
             Prefix::Command => self.commands(query),
             Prefix::Path => self.paths(query),
+            // Asked for through `Source::argument` instead: a value is the command's business, and
+            // which command is a fact about the line rather than about the prefix.
+            Prefix::Argument => Vec::new(),
         }
     }
 }
@@ -280,6 +302,30 @@ mod tests {
             source.candidates(Prefix::Path, "src/../..").is_empty(),
             "and neither does escaping"
         );
+    }
+
+    #[test]
+    fn a_command_offers_the_values_it_takes() {
+        let source = SessionSource::new(scratch("values"));
+
+        let themes = source.argument("theme", "dr");
+        assert_eq!(themes.len(), 1);
+        assert_eq!(themes[0].label, "dracula");
+        assert_eq!(source.argument("theme", "").len(), Theme::NAMES.len());
+        assert_eq!(source.argument("glyphs", "un")[0].label, "unicode");
+
+        // A command with nothing to choose from says nothing rather than guessing.
+        assert!(source.argument("clear", "").is_empty());
+        assert!(source.argument("nope", "").is_empty());
+    }
+
+    #[test]
+    fn every_theme_the_menu_offers_is_one_that_works() {
+        // The list and the match inside `Theme::named` have to agree: a name offered here that does
+        // not resolve is a menu entry that fails when it is taken.
+        for name in Theme::NAMES {
+            assert!(Theme::named(name).is_some(), "{name} 列了却拿不到");
+        }
     }
 
     #[test]

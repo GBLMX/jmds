@@ -27,6 +27,11 @@
 pub enum Prefix {
     /// A command: `/` at the start of the line.
     Command,
+    /// A command's argument: the word after `/command `.
+    ///
+    /// Which values are any good is the command's business, not this engine's; the engine's job is
+    /// only to say that the caret is in the position where a value goes.
+    Argument,
     /// A path: `@`, optionally followed by a quote.
     Path,
 }
@@ -85,6 +90,15 @@ impl Item {
 /// Where candidates come from. The engine never looks at the file system itself.
 pub trait Source {
     fn candidates(&self, prefix: Prefix, query: &str) -> Vec<Item>;
+
+    /// The values a command takes, for the caret sitting in its argument.
+    ///
+    /// Asked separately — and by name — because the engine can tell the caret is in an argument but
+    /// not which command put it there: that is a fact about the line, which the caller has and this
+    /// engine deliberately does not.
+    fn argument(&self, _command: &str, _query: &str) -> Vec<Item> {
+        Vec::new()
+    }
 }
 
 /// The menu: what is offered, and what is selected.
@@ -110,7 +124,13 @@ impl Completion {
     /// characters counts what a person sees rather than what the bytes happen to be.
     pub fn at(text: &str, caret: usize, source: &impl Source) -> Option<Self> {
         let token = token_at(text, caret)?;
-        let mut items = source.candidates(token.prefix, &token.query);
+        let mut items = match token.prefix {
+            Prefix::Argument => match command_word(text) {
+                Some(command) => source.argument(command, &token.query),
+                None => Vec::new(),
+            },
+            prefix => source.candidates(prefix, &token.query),
+        };
         rank(&mut items, &token.query);
         if items.is_empty() {
             return None;
@@ -163,6 +183,8 @@ impl Completion {
 
         let sigil = match self.token.prefix {
             Prefix::Command => "/",
+            // An argument has no sigil: what is being replaced is a bare word.
+            Prefix::Argument => "",
             // The `@` is kept: it is what makes the line a path, and the quote only collects spaces.
             Prefix::Path if self.token.quoted => "@\"",
             Prefix::Path => "@",
@@ -187,8 +209,48 @@ impl Completion {
 
 /// The token the caret is inside, or `None` when it is not in one.
 ///
-/// A command's token ends at the first whitespace: `/theme ` is a command that has already been
-/// chosen, and completing its *argument* is a different job from completing the command.
+/// Where a command's argument starts, if the caret is in it.
+///
+/// `None` for everything else: a line without a command, a caret still inside the command word, and a
+/// command whose word is not over yet. The space is what decides between "typing a command" and
+/// "typing its argument".
+fn argument_position(before: &[char]) -> Option<usize> {
+    let leading = before.iter().take_while(|c| c.is_whitespace()).count();
+    if before.get(leading) != Some(&'/') {
+        return None;
+    }
+    let command_end = leading
+        + 1
+        + before[leading + 1..]
+            .iter()
+            .take_while(|c| !c.is_whitespace())
+            .count();
+    if before.get(command_end) != Some(&' ') {
+        return None;
+    }
+    // Skip the spaces between: the argument is the word the caret is in, wherever it starts.
+    let start = command_end
+        + before[command_end..]
+            .iter()
+            .take_while(|c| c.is_whitespace())
+            .count();
+    Some(start)
+}
+
+/// The command word of a line, without its slash — the word the caret is completing if it sits in the
+/// argument position.
+fn command_word(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let body = trimmed.strip_prefix('/')?;
+    let name = body.split_whitespace().next()?;
+    let rest = &body[name.len()..];
+    // Only when the word is over: `--` and `/theme` with nothing after it are not arguments yet.
+    rest.chars()
+        .next()
+        .is_some_and(char::is_whitespace)
+        .then_some(name)
+}
+
 pub fn token_at(text: &str, caret: usize) -> Option<Token> {
     let characters: Vec<char> = text.chars().collect();
     let caret = caret.min(characters.len());
@@ -210,6 +272,18 @@ pub fn token_at(text: &str, caret: usize) -> Option<Token> {
                 quoted: false,
             });
         }
+    }
+
+    // A command's argument: `/theme dr` with the caret in `dr`. A command word with the caret still
+    // in it is a command being typed, not an argument, which is what the space decides.
+    if let Some(start) = argument_position(before) {
+        return Some(Token {
+            start,
+            prefix: Prefix::Argument,
+            query: before[start..].iter().collect(),
+            end: caret,
+            quoted: false,
+        });
     }
 
     // Whether the caret sits inside an unclosed quote decides what a delimiter means: inside one, a
@@ -309,6 +383,12 @@ mod tests {
         fn candidates(&self, _prefix: Prefix, _query: &str) -> Vec<Item> {
             self.0.clone()
         }
+
+        /// The same list for arguments: this double exists to answer "what is offered", and which
+        /// question was asked is the engine's business, not the double's.
+        fn argument(&self, _command: &str, _query: &str) -> Vec<Item> {
+            self.0.clone()
+        }
     }
 
     fn source(names: &[&str]) -> Fixed {
@@ -333,10 +413,11 @@ mod tests {
         assert_eq!(token.start, 3, "the token starts at the slash");
         assert_eq!(token.query, "the");
 
-        // Once the command's word is finished, the caret is not in it any more.
-        assert!(
-            token_at("/theme ", 7).is_none(),
-            "the command is already chosen"
+        // Once the command's word is finished, the caret is in its argument instead — which is a
+        // different question with a different answer, and the test below is where that lives.
+        assert_eq!(
+            token_at("/theme ", 7).expect("参数的位置").prefix,
+            Prefix::Argument
         );
         // And a slash anywhere else is a path that nobody asked to complete.
         assert!(token_at("look at /usr", 12).is_none());
@@ -430,6 +511,34 @@ mod tests {
         assert_eq!(completion.selected, 2, "up from the top is the bottom");
         completion.move_selection(1);
         assert_eq!(completion.selected, 0);
+    }
+
+    #[test]
+    fn the_caret_in_a_commands_argument_is_an_argument() {
+        let token = token_at("/theme dr", 9).expect("参数里的光标");
+        assert_eq!(token.prefix, Prefix::Argument);
+        assert_eq!(token.query, "dr");
+        assert_eq!(token.start, 7);
+
+        // The space is the boundary, so an argument that is still empty is still an argument.
+        let token = token_at("/theme ", 7).expect("刚敲完空格");
+        assert_eq!(token.prefix, Prefix::Argument);
+        assert_eq!(token.query, "");
+        // A caret still inside the command word is a command being typed.
+        assert_eq!(
+            token_at("/theme", 6).expect("还在命令里").prefix,
+            Prefix::Command
+        );
+        // And prose is neither.
+        assert_eq!(token_at("just words", 5), None);
+    }
+
+    #[test]
+    fn accepting_an_argument_replaces_the_word_without_a_sigil() {
+        let items = Fixed(vec![Item::new("dracula")]);
+        let (text, caret) = accept("/theme dr", 9, items.0[0].clone(), &items);
+        assert_eq!(text, "/theme dracula");
+        assert_eq!(caret, 14, "光标落在插入的东西之后");
     }
 
     #[test]

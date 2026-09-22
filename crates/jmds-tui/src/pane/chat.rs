@@ -939,7 +939,21 @@ mod tests {
         // The command that takes an argument leaves a space, so the argument can follow directly.
         assert_eq!(chat.input, "/theme ");
         assert_eq!(chat.caret, 7);
-        assert!(chat.menu.is_none(), "and the line is no longer a command");
+        // Accepting a command that takes an argument leaves the menu open on its values: the next
+        // thing anyone types is that argument, and reaching for a space bar to get there is exactly
+        // the kind of step a menu exists to remove.
+        assert_eq!(menu_labels(&chat).len(), crate::theme::Theme::NAMES.len());
+    }
+
+    #[test]
+    fn a_commands_value_is_completed_too() {
+        let mut chat = Chat::new();
+        typed(&mut chat, "/theme dr");
+        assert_eq!(menu_labels(&chat), ["dracula"]);
+
+        chat.on_key(key(KeyCode::Tab));
+        assert_eq!(chat.input, "/theme dracula");
+        assert_eq!(chat.caret, 14);
     }
 
     #[test]

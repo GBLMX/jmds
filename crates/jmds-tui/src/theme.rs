@@ -444,6 +444,21 @@ impl Default for Theme {
 }
 
 impl Theme {
+    /// Every built-in theme's name, for anything that offers a choice.
+    ///
+    /// Kept next to [`Theme::named`] because the two have to agree: a name offered here that does not
+    /// resolve is a menu entry that fails, and the test below is what keeps them honest.
+    pub const NAMES: &'static [&'static str] = &[
+        "terminal",
+        "default",
+        "dracula",
+        "nord",
+        "gruvbox",
+        "tokyo-night",
+        "catppuccin",
+        "one-dark",
+    ];
+
     /// A built-in theme by name.
     pub fn named(name: &str) -> Option<Self> {
         let palette = match name {
