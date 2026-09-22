@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! What the terminal can do, and how to talk to it.
 //!
 //! Four subjects, one file each behind this facade:

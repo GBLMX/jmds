@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! The terminal's background: `COLORFGBG` when it is exported, the OSC 11 query otherwise.
 //!
 //! The query itself is platform-shaped — a tty on Unix, the console API on Windows — so each

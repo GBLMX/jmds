@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! Upgrading a `config.toml` that an older build wrote.
 //!
 //! The file is the user's, so a migration edits **their document** rather than writing a new one:

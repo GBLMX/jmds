@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! Colour maths: the palette tables, and what a colour works out to.
 //!
 //! Two callers share it: the theme layer, which down-samples a colour for the terminal's

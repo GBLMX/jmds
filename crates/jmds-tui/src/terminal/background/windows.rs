@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! The Windows half of the background probe: the console's own answer, which is all there is
 //! to ask when ConPTY sits in the way of the byte stream.
 

@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! The Unix half of the background probe.
 //!
 //! A tty is opened and written the OSC 11 query on, and the reply is read back under one

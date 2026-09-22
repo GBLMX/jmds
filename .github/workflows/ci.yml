@@ -1,3 +1,4 @@
+# Ported from GBLMX/pigma (Apache-2.0) and adapted — see CREDITS.md.
 name: CI
 
 # 自用项目：这里保留的都是**会真的拦住我**的检查 —— 格式（nightly 专有选项）、clippy 警告即失败、

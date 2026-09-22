@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! What the terminal is: the colour depth it can show, the shape of its cursor, and the
 //! terminal-family and multiplexer it sits behind.
 //!

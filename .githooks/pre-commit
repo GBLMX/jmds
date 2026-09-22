@@ -1,4 +1,5 @@
 #!/bin/sh
+# Ported from GBLMX/pigma (Apache-2.0) and adapted — see CREDITS.md.
 # Format check before a commit.
 #
 # CI runs `cargo +nightly fmt -- --check` on every push, and the repo's rustfmt options are

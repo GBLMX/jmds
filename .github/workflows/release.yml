@@ -1,3 +1,4 @@
+# Ported from GBLMX/pigma (Apache-2.0) and adapted — see CREDITS.md.
 name: Release
 
 on:

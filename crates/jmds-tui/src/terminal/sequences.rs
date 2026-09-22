@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! Escape-sequence emission: the bytes the app writes to change something about the
 //! terminal, rather than to draw a cell.
 

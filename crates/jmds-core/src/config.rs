@@ -1,3 +1,5 @@
+// Ported from GBLMX/pigma (Apache-2.0) and adapted for this workspace — see CREDITS.md and
+// THIRD_PARTY_LICENSES/ for what changed and the licence text.
 //! `config.toml` — the file this build reads and writes.
 //!
 //! Two rules shape it. Anything a run *must* be told stays out of it: the API key comes from the
