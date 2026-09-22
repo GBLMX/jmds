@@ -15,6 +15,10 @@
 //! a mouse from.
 //!
 //! A pane that grows its own opinion about layout is the failure this module exists to prevent.
+//!
+//! The kinds live beside this file: [`chat`] is the conversation.
+
+pub mod chat;
 
 use std::collections::BTreeMap;
 
@@ -25,7 +29,7 @@ use jmds_core::{
 };
 use ratatui::{
     buffer::Buffer,
-    layout::Rect,
+    layout::{Position, Rect},
     style::{Modifier, Style},
     widgets::{Block, Widget},
 };
@@ -84,6 +88,15 @@ pub trait Pane {
 
     /// Something happened in the engine — a model delta, a tool result, a file that changed.
     fn on_agent_event(&mut self, _event: &AgentEvent) {}
+
+    /// Where the terminal's cursor belongs, in `area`'s coordinates, if this pane has one.
+    ///
+    /// The pane cannot place it itself: the cursor is a property of the frame, not of a cell in the
+    /// buffer, and drawing a fake one is how a text field ends up with two cursors that disagree.
+    /// An editor's caret and an input line are the callers; a pane of read-only output has none.
+    fn cursor(&self, _area: Rect) -> Option<Position> {
+        None
+    }
 }
 
 /// The panes, their layout, and the input that moves between them.
@@ -193,6 +206,26 @@ impl PaneHost {
     /// The geometry of the last frame.
     pub fn geometry(&self) -> &[(PaneId, PaneRect)] {
         &self.geometry
+    }
+
+    /// Where the terminal's cursor belongs this frame, in screen cells.
+    ///
+    /// Only the focused pane is asked, and only when it has one: an unfocused editor's caret must
+    /// not drag the cursor away from wherever the user is actually typing.
+    pub fn focused_cursor(&self) -> Option<Position> {
+        let id = self.tree.focused_id()?;
+        let (_, rect) = self.geometry.iter().find(|(open, _)| *open == id)?;
+        let inner = Rect {
+            x: rect.x + 1,
+            y: rect.y + 1,
+            width: rect.width.saturating_sub(2),
+            height: rect.height.saturating_sub(2),
+        };
+        let position = self.panes.get(&id)?.cursor(inner)?;
+        Some(Position::new(
+            inner.x + position.x.min(inner.width.saturating_sub(1)),
+            inner.y + position.y.min(inner.height.saturating_sub(1)),
+        ))
     }
 
     /// Which pane holds `(column, row)` — what a click means.
