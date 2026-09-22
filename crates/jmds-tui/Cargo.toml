@@ -6,6 +6,11 @@ description = "Just My DeepSeek: the terminal — what it can do, and how to tal
 license = "MIT"
 
 [dependencies]
+# The editor pane. Default features are off on purpose: syntax highlighting pulls a
+# tree-sitter grammar per language, and this app is not a code editor — it edits one short
+# prompt file. Clipboard and mouse support come with their own dependencies and their own
+# platforms; both are later, if ever.
+edtui = { version = "0.11.7", default-features = false }
 base64 = "0.23.1"
 crossterm = { workspace = true }
 jmds-core = { path = "../jmds-core" }

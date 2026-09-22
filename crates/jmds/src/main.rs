@@ -28,12 +28,13 @@ use jmds_core::{
     config::Config,
     event::{AgentEvent, Event as BusEvent, EventBus},
     paths::sessions_dir,
+    prompt::{Prompt, default_prompt_path},
     session::{Header, SessionFile, new_id},
     tools::set::ToolSet,
 };
 use jmds_tui::{
     app::{Action, App},
-    pane::chat::Chat,
+    pane::{chat::Chat, editor::Editor},
     terminal::{
         COLOR_MODE, ColorMode, begin_synchronized_update, disable_terminal_modes,
         enable_terminal_modes, end_synchronized_update,
@@ -113,7 +114,18 @@ async fn session_loop(
 
     let mut app = App::new();
     app.host_mut().set_theme(theme);
-    app.open(jmds_core::pane::Axis::Horizontal, Chat::new());
+
+    // The conversation takes the whole area first, then the prompt file splits it. Focus stays in
+    // the chat because that is where a turn is started from; the editor is where the *next*
+    // question gets written.
+    let chat = app.open(jmds_core::pane::Axis::Horizontal, Chat::new());
+    match open_prompt_pane(&cwd, config.editor.tab_width) {
+        Some(editor) => {
+            app.open(jmds_core::pane::Axis::Horizontal, editor);
+            app.host_mut().focus(chat);
+        }
+        None => log::warn!("提示词文件打不开，这次只有对话面板"),
+    }
 
     let mut out = io::stdout();
     let mut input = EventStream::new();
@@ -251,6 +263,33 @@ fn spawn_conversation(
             }
         }
     })
+}
+
+/// The prompt-file pane.
+///
+/// The file is written from the template the first time, which is the one file this app creates
+/// without being asked: a format nobody can see is a format nobody uses, and the alternative is an
+/// editor pane that opens onto nothing with no hint of what belongs in it.
+fn open_prompt_pane(cwd: &std::path::Path, tab_width: u8) -> Option<Editor> {
+    let path = default_prompt_path();
+    if !path.exists() {
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            log::warn!("建不了 {}: {error}", parent.display());
+            return None;
+        }
+        if let Err(error) = std::fs::write(&path, Prompt::template()) {
+            log::warn!("写不了 {}: {error}", path.display());
+        }
+    }
+    match Editor::open(&path, cwd) {
+        Ok(editor) => Some(editor.with_tab_width(tab_width.max(1) as usize)),
+        Err(error) => {
+            log::warn!("{} 打不开: {error}", path.display());
+            None
+        }
+    }
 }
 
 /// What the model is told about itself and where it is.

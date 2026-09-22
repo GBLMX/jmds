@@ -19,6 +19,7 @@
 //! The kinds live beside this file: [`chat`] is the conversation.
 
 pub mod chat;
+pub mod editor;
 
 use std::collections::BTreeMap;
 

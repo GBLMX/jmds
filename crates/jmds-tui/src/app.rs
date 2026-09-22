@@ -13,17 +13,15 @@
 //!
 //! Keys arrive in a fixed order, and the order is the whole design:
 //!
-//! 1. **A small set the panes cannot take**: `Ctrl+Q` quits and `Ctrl+W` closes the focused pane.
-//!    These run *before* the pane for one reason: a pane that swallows everything — a terminal
-//!    running a full-screen program, an editor in a modal state — must not be able to trap the
-//!    user. Two keys, no more: every key in this set is a key no pane can ever use.
+//! 1. **The app's own keys, first**: `Ctrl+Q` quits, `Ctrl+W` closes the focused pane, `Ctrl+T`
+//!    cycles focus, `Alt+1`…`Alt+9` jump to a pane by position.
 //! 2. **The focused pane's turn**, which answers [`KeyOutcome::Handled`] or [`KeyOutcome::Ignored`].
-//! 3. **The rest of the app's keys** — only for keys the pane ignored: `Ctrl+T` cycles focus,
-//!    `Alt+1`…`Alt+9` jump to a pane by position.
 //!
-//! That middle step is why keys are not a match at the top of the loop: `Tab` means "indent" in an
-//! editor and "next item" in a file tree, and both must keep it, while `Tab` in a pane with no
-//! opinion moves focus. The app does not have to know which pane it is looking at.
+//! The order used to be the other way round — the pane first — on the theory that `Tab` means
+//! "indent" in an editor, so a pane must be able to keep a key. The editor pane settled it: it is a
+//! vim, it consumes *every* key it is given, and with the old order, focus in the editor made pane
+//! navigation impossible. Every key in the first set is one no pane can want for editing — quit,
+//! close, cycle, jump — so the app takes them and the pane gets everything else.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use jmds_core::{event::AgentEvent, pane::Axis};
@@ -76,22 +74,19 @@ impl App {
 
     /// The key policy, in the order it is written above.
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
-        if let Some(action) = self.unstealable(key) {
+        if let Some(action) = self.app_key(key) {
             return action;
         }
-
-        // The focused pane first: `Tab` in an editor is an indent, and only a pane with no use for
-        // a key should lose it to the app.
-        if self.host.on_key(key).is_handled() {
+        if self.navigate(key) {
             return Action::Continue;
         }
-
-        self.app_key(key);
+        // Everything else is the pane's, whether it uses it or not.
+        self.host.on_key(key);
         Action::Continue
     }
 
-    /// The two keys no pane may take, and the only place a pane can be closed from.
-    fn unstealable(&mut self, key: KeyEvent) -> Option<Action> {
+    /// The keys the app answers itself, and the only place a pane can be closed from.
+    fn app_key(&mut self, key: KeyEvent) -> Option<Action> {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Char('q') if control => Some(Action::Quit),
@@ -114,13 +109,14 @@ impl App {
         }
     }
 
-    /// Keys the app answers only when the focused pane had no use for them.
-    fn app_key(&mut self, key: KeyEvent) {
+    /// The navigation keys, which have no `Action` of their own. Answers whether it used the key.
+    fn navigate(&mut self, key: KeyEvent) -> bool {
         let control = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         match key.code {
             KeyCode::Char('t') if control => {
                 self.host.cycle_focus();
+                true
             }
             KeyCode::Char(digit @ '1'..='9') if alt => {
                 // Layout order from the tree, not from the last frame's geometry: a key that only
@@ -130,8 +126,9 @@ impl App {
                 if let Some(id) = self.host.tree().leaves().get(wanted) {
                     self.host.focus(*id);
                 }
+                true
             }
-            _ => {}
+            _ => false,
         }
     }
 
@@ -289,40 +286,34 @@ mod tests {
     }
 
     #[test]
-    fn a_key_the_pane_ignores_is_still_the_apps() {
-        // The middle step of the policy, both ways round: the same key, two panes, two outcomes.
+    fn the_apps_keys_never_reach_a_pane() {
+        // The editor pane is a vim: it consumes every key it is given. That is why the app's keys
+        // go first — with the old order, pane navigation died the moment focus landed in the editor.
         let mut app = App::new();
-        let (handling, handled_keys) = Recorder::new(true);
-        let first = app.open(Axis::Horizontal, handling);
-        let (ignoring, ignored_keys) = Recorder::new(false);
-        let second = app.open(Axis::Horizontal, ignoring);
+        let (greedy, keys) = Recorder::new(true);
+        let first = app.open(Axis::Horizontal, greedy);
+        let second = app.open(Axis::Horizontal, Recorder::new(true).0);
 
-        // The focused pane is asked first, and when it ignores the key the app's own handling runs:
-        // which for `Ctrl+T` means focus moves on.
-        assert_eq!(app.host().focused_id(), Some(second));
-        app.on_key(control(KeyCode::Char('t')));
-        assert_eq!(handled_keys.borrow().len(), 0, "that pane handled nothing");
-        assert_eq!(
-            ignored_keys.borrow().len(),
-            1,
-            "the focused pane was asked first"
-        );
-        assert_eq!(
-            app.host().focused_id(),
-            Some(first),
-            "it ignored the key, so the app cycled focus"
-        );
+        for key in [
+            control(KeyCode::Char('q')),
+            control(KeyCode::Char('w')),
+            control(KeyCode::Char('t')),
+            alt(KeyCode::Char('1')),
+        ] {
+            // `Ctrl+Q` would quit and `Ctrl+W` would close, so they are not sent here; the point of
+            // this test is that the pane sees none of it.
+            if matches!(key.code, KeyCode::Char('q') | KeyCode::Char('w')) {
+                continue;
+            }
+            app.on_key(key);
+        }
+        assert!(keys.borrow().is_empty(), "the pane saw {:?}", keys.borrow());
 
-        // A pane that takes the key never lets it reach the app's own handling.
-        app.host_mut().focus(first);
-        handled_keys.borrow_mut().clear();
-        app.on_key(control(KeyCode::Char('t')));
-        assert_eq!(handled_keys.borrow().as_slice(), &[KeyCode::Char('t')]);
-        assert_eq!(
-            app.host().focused_id(),
-            Some(first),
-            "the pane took it, so focus did not move"
-        );
+        // And they did what they say: `Ctrl+T` moved focus, `Alt+1` jumped back.
+        assert_eq!(app.host().focused_id(), Some(first));
+        assert!(app.host().pane(second).is_some());
+        assert_eq!(app.on_key(control(KeyCode::Char('q'))), Action::Quit);
+        assert!(keys.borrow().is_empty(), "not even the quit key");
     }
 
     #[test]

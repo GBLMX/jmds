@@ -14,5 +14,6 @@ pub mod event;
 pub mod logger;
 pub mod pane;
 pub mod paths;
+pub mod prompt;
 pub mod session;
 pub mod tools;
