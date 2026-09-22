@@ -142,6 +142,17 @@ impl App {
         Action::Continue
     }
 
+    /// A frame passed. The loop that owns the clock calls this, which is what animates a pane with
+    /// something to show while a turn runs.
+    pub fn tick(&mut self) {
+        self.host.tick();
+    }
+
+    /// What the panes are asking for: what the human typed and pressed Enter on.
+    pub fn take_requests(&mut self) -> Vec<String> {
+        self.host.take_requests()
+    }
+
     /// One frame.
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
         self.host.draw(area, buf);

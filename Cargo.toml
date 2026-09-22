@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/jmds-api", "crates/jmds-core", "crates/jmds-tui"]
+members = ["crates/jmds", "crates/jmds-api", "crates/jmds-core", "crates/jmds-tui"]
 resolver = "3"
 
 # Versions shared by more than one crate, so the lockfile holds one of each. Members pull them

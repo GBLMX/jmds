@@ -94,6 +94,19 @@ pub trait Pane {
     /// Something happened in the engine — a model delta, a tool result, a file that changed.
     fn on_agent_event(&mut self, _event: &AgentEvent) {}
 
+    /// A frame passed. Only panes with something to animate need this; it is the app that owns the
+    /// clock, so that a pane never grows a timer of its own.
+    fn tick(&mut self) {}
+
+    /// What this pane wants sent to the engine, drained after every key.
+    ///
+    /// A pane does not talk to the model: it says what the human asked for, and the app decides
+    /// what that means. Returning owned lines rather than holding a channel keeps a pane's
+    /// behaviour a function of the keys it was given, which is what makes it testable.
+    fn take_requests(&mut self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Where the terminal's cursor belongs, in `area`'s coordinates, if this pane has one.
     ///
     /// The pane cannot place it itself: the cursor is a property of the frame, not of a cell in the
@@ -302,6 +315,22 @@ impl PaneHost {
             Some(pane) => pane.on_key(key),
             None => KeyOutcome::Ignored,
         }
+    }
+
+    /// A frame passed, for every pane.
+    pub fn tick(&mut self) {
+        for pane in self.panes.values_mut() {
+            pane.tick();
+        }
+    }
+
+    /// What the panes want sent, oldest first.
+    pub fn take_requests(&mut self) -> Vec<String> {
+        let mut requests = Vec::new();
+        for pane in self.panes.values_mut() {
+            requests.extend(pane.take_requests());
+        }
+        requests
     }
 
     /// Tell every pane what happened. Panes that do not care ignore it by default, so this stays a

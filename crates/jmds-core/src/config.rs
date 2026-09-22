@@ -29,6 +29,7 @@ pub struct Config {
     pub logger: Logger,
     pub api: ApiConfig,
     pub editor: EditorConfig,
+    pub theme: ThemeConfig,
 }
 
 impl Default for Config {
@@ -38,6 +39,7 @@ impl Default for Config {
             logger: Logger::default(),
             api: ApiConfig::default(),
             editor: EditorConfig::default(),
+            theme: ThemeConfig::default(),
         }
     }
 }
@@ -81,6 +83,29 @@ impl ApiConfig {
 
     pub fn api_key(&self) -> Option<String> {
         self.api_key_with(|name| std::env::var(name).ok())
+    }
+}
+
+/// How the app should look.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ThemeConfig {
+    /// One of the built-in theme names. An unknown name falls back to the terminal's own colours
+    /// rather than failing a run over a typo in a colour scheme.
+    pub name: String,
+    /// `unicode` or `ascii`.
+    pub glyphs: String,
+    /// `auto` (probe the terminal), or `truecolor` / `ansi256` / `ansi`.
+    pub color_mode: String,
+}
+
+impl Default for ThemeConfig {
+    fn default() -> Self {
+        Self {
+            name: "terminal".into(),
+            glyphs: "unicode".into(),
+            color_mode: "auto".into(),
+        }
     }
 }
 

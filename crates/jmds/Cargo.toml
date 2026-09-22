@@ -1,0 +1,21 @@
+[package]
+name = "jmds"
+version = "0.1.0"
+edition = "2024"
+description = "Just My DeepSeek: the binary — a terminal app wrapping the engine"
+license = "MIT"
+
+[[bin]]
+name = "jmds"
+path = "src/main.rs"
+
+[dependencies]
+color-eyre = { workspace = true }
+crossterm = { workspace = true }
+futures-util = { workspace = true }
+jmds-api = { path = "../jmds-api" }
+jmds-core = { path = "../jmds-core" }
+jmds-tui = { path = "../jmds-tui" }
+log = { workspace = true }
+ratatui = { workspace = true }
+tokio = { workspace = true }

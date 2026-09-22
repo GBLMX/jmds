@@ -123,7 +123,7 @@ impl Chat {
     }
 
     /// Take what the human has asked to send, oldest first.
-    pub fn take_outbox(&mut self) -> Vec<String> {
+    fn take_outbox(&mut self) -> Vec<String> {
         self.outbox.drain(..).collect()
     }
 
@@ -484,6 +484,11 @@ impl Pane for Chat {
             &window.text,
             styles.text,
         );
+    }
+
+    /// The lines the human has sent, for the app to hand to the engine.
+    fn take_requests(&mut self) -> Vec<String> {
+        self.take_outbox()
     }
 
     fn cursor(&self, area: Rect) -> Option<Position> {

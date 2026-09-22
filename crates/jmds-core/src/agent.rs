@@ -214,7 +214,15 @@ impl<M: Model, T: Tools> Agent<M, T> {
         // arrive, and this side reads them as they are written. Awaiting the request first would
         // deadlock on a bounded channel and would defeat the point of streaming anyway.
         let (sink, mut events) = mpsc::unbounded_channel();
-        let (result, turn) = tokio::join!(self.model.stream(messages, specs, &sink), async {
+        // The sink is dropped by the request, not by this function: a channel's receiver only ends
+        // when every sender is gone, so a sink that outlived the stream would leave the reader
+        // waiting for a turn that had already finished.
+        let request = async {
+            let result = self.model.stream(messages, specs, &sink).await;
+            drop(sink);
+            result
+        };
+        let (result, turn) = tokio::join!(request, async {
             let mut turn = Turn::default();
             while let Some(event) = events.recv().await {
                 turn.absorb(event, &self.bus);
@@ -265,10 +273,13 @@ impl Turn {
                 arguments,
             } => {
                 let partial = self.calls.entry(index).or_default();
-                if let Some(id) = id {
+                // Only a non-empty piece counts. The id and the name arrive in the first fragment
+                // and later fragments repeat them as empty, so taking the last one seen would erase
+                // the tool's name and send the model a call with no callee.
+                if let Some(id) = id.filter(|id| !id.is_empty()) {
                     partial.id = Some(id);
                 }
-                if let Some(name) = name {
+                if let Some(name) = name.filter(|name| !name.is_empty()) {
                     partial.name = Some(name);
                 }
                 if let Some(arguments) = arguments {
@@ -498,6 +509,7 @@ mod tests {
         );
         assert!(events.contains(&AgentEvent::Content("The answer ".into())));
         assert!(events.contains(&AgentEvent::Usage(TurnUsage {
+            completion_tokens: 9,
             reasoning_tokens: 7,
             ..TurnUsage::default()
         })));
@@ -550,15 +562,42 @@ mod tests {
         }));
 
         // The history the second request was built from: system, user, the assistant's call, the
-        // tool's answer, and it is the same list the caller is left holding.
-        assert_eq!(messages.len(), 6);
-        assert_eq!(messages[3].role, Role::Assistant);
-        assert_eq!(messages[3].tool_calls.len(), 1);
-        assert_eq!(messages[4].role, Role::Tool);
-        assert_eq!(messages[4].tool_call_id.as_deref(), Some("call_1"));
-        assert_eq!(messages[4].content.as_deref(), Some("hello\n"));
-        assert_eq!(messages[5].role, Role::Assistant);
+        // tool's answer, and the assistant's reply — which is the same list the caller holds.
+        assert_eq!(messages.len(), 5);
+        assert_eq!(messages[2].role, Role::Assistant);
+        assert_eq!(messages[2].tool_calls.len(), 1);
+        assert_eq!(messages[3].role, Role::Tool);
+        assert_eq!(messages[3].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(messages[3].content.as_deref(), Some("hello\n"));
+        assert_eq!(messages[4].role, Role::Assistant);
         assert_eq!(agent.model.requests().len(), 2, "the model was asked twice");
+    }
+
+    #[tokio::test]
+    async fn a_later_empty_fragment_does_not_erase_the_tool_the_call_is_for() {
+        // What the wire actually does: the name is in the first fragment and later fragments carry
+        // it as an empty string. Taking the last one would call a tool with no name.
+        let model = Scripted::new(vec![
+            vec![
+                call_delta(0, "call_1", "read", "{\"path\":"),
+                call_delta(0, "", "", "\"a.txt\"}"),
+                StreamEvent::Finished(ApiFinish::ToolCalls),
+            ],
+            vec![
+                StreamEvent::Content("done".into()),
+                StreamEvent::Finished(ApiFinish::Stop),
+            ],
+        ]);
+        let tools = Fake::new(ToolOutcome::done("ok", "x"));
+        let (agent, _bus) = agent(model, tools);
+        let mut messages = user("read it");
+
+        agent.run(&mut messages).await.unwrap();
+        assert_eq!(
+            agent.tools.calls(),
+            vec![("read".to_string(), "{\"path\":\"a.txt\"}".to_string())],
+            "the call reached the tool with its name and its whole arguments"
+        );
     }
 
     #[tokio::test]
@@ -647,8 +686,9 @@ mod tests {
             ok: false,
             summary: "read failed: no such file".into(),
         }));
-        assert_eq!(messages[4].role, Role::Tool);
-        assert_eq!(messages[5].content.as_deref(), Some("it is not there"));
+        // system, user, the assistant's call, the tool's answer, the assistant's reply.
+        assert_eq!(messages[3].role, Role::Tool);
+        assert_eq!(messages[4].content.as_deref(), Some("it is not there"));
     }
 
     #[tokio::test]
