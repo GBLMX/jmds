@@ -322,12 +322,17 @@ async fn session_loop(
     };
 
     loop {
-        // One frame, written as one update: without this a redraw is visible while it is being
-        // written, which is exactly what makes an 80 ms animation flicker.
-        begin_synchronized_update(&mut out)?;
-        let drawn = terminal.draw(|frame| app.draw(frame.area(), frame.buffer_mut()));
-        end_synchronized_update(&mut out)?;
-        drawn?;
+        // One frame, and only when there is something to put in it: the tick is a clock, and most
+        // ticks have nothing to show. Drawing anyway re-lays-out the whole transcript twelve times a
+        // second to write the same pixels back, a cost that grows with the conversation.
+        if app.wants_frame() {
+            // Written as one update: without this a redraw is visible while it is being written,
+            // which is exactly what makes an 80 ms animation flicker.
+            begin_synchronized_update(&mut out)?;
+            let drawn = terminal.draw(|frame| app.draw(frame.area(), frame.buffer_mut()));
+            end_synchronized_update(&mut out)?;
+            drawn?;
+        }
 
         tokio::select! {
             incoming = input.next() => match incoming {
@@ -366,7 +371,7 @@ async fn session_loop(
                 Some(Ok(TermEvent::Mouse(mouse))) => {
                     app.on_mouse(mouse);
                 }
-                Some(Ok(TermEvent::Resize(..))) => {}
+                Some(Ok(TermEvent::Resize(..))) => app.touch(),
                 Some(Ok(_)) => {}
                 Some(Err(error)) => {
                     log::warn!("读终端输入失败: {error}");

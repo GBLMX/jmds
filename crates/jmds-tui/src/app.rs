@@ -46,6 +46,17 @@ pub enum Action {
 /// The panes, and the keys that belong to the app rather than to them.
 pub struct App {
     host: PaneHost,
+    /// Whether anything has happened since the last frame.
+    ///
+    /// The app is drawn on a clock, and most ticks have nothing to show: drawing anyway means
+    /// re-laying-out the transcript twelve times a second to put the same pixels back. A flag set by
+    /// everything that changes something, plus what the panes ask for themselves, is what turns the
+    /// clock back into a clock.
+    dirty: bool,
+    /// The rectangle the last frame was drawn into. A frame whose area changed is worth another one:
+    /// the panes only learn their size by being drawn, and a terminal that never saw its new size never
+    /// tells the pty either.
+    last_area: Rect,
     /// The split line a drag is moving, if a drag is happening.
     ///
     /// Kept here rather than asked for on every motion event: what a drag means is "the line it
@@ -83,6 +94,8 @@ impl App {
         Self {
             host: PaneHost::new(),
             dragging: None,
+            dirty: true,
+            last_area: Rect::new(0, 0, 0, 0),
         }
     }
 
@@ -105,7 +118,19 @@ impl App {
     }
 
     /// The key policy, in the order it is written above.
+    /// Whether a frame is worth drawing.
+    pub fn wants_frame(&self) -> bool {
+        self.dirty || self.host.wants_frame()
+    }
+
+    /// Something outside changed that no pane has heard about — the terminal was resized, a file the
+    /// app read is gone. The next frame is owed because the last one is out of date.
+    pub fn touch(&mut self) {
+        self.dirty = true;
+    }
+
     pub fn on_key(&mut self, key: KeyEvent) -> Action {
+        self.dirty = true;
         if let Some(action) = self.app_key(key) {
             return action;
         }
@@ -123,6 +148,7 @@ impl App {
     /// over. Neither is the only way to do anything — this is a terminal app, and the keyboard is
     /// the first mouth.
     pub fn on_mouse(&mut self, mouse: MouseEvent) -> Action {
+        self.dirty = true;
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 // A press on a split line starts moving it; anywhere else it is a click, which is how
@@ -238,17 +264,20 @@ impl App {
     /// An event from the engine, for whoever is listening. Nothing here quits: a model that fails,
     /// a tool that errors, a file that changed — none of those are reasons to close the app.
     pub fn on_agent_event(&mut self, event: &AgentEvent) -> Action {
+        self.dirty = true;
         self.host.on_agent_event(event);
         Action::Continue
     }
 
     /// Tell the panes that a file under the project root changed.
     pub fn on_file_event(&mut self, event: &jmds_core::event::FileEvent) {
+        self.dirty = true;
         self.host.on_file_event(event);
     }
 
     /// Hand a pty event to the pane it is about.
     pub fn on_pty_event(&mut self, event: &jmds_core::event::PtyEvent) {
+        self.dirty = true;
         self.host.on_pty_event(event);
     }
 
@@ -259,6 +288,7 @@ impl App {
     /// by a running command is placed beside the shell rather than beside whatever happens to have
     /// focus, because a command's output belongs with the other commands.
     pub fn on_pane_event(&mut self, event: &jmds_core::event::PaneEvent) {
+        self.dirty = true;
         use jmds_core::event::PaneEvent;
         use jmds_core::pane::PaneKind;
 
@@ -359,6 +389,7 @@ impl App {
     /// names a command the app does not have is *answered* rather than forwarded, because a typo
     /// turned into a question is a typo the model will answer confidently and wrongly.
     pub fn handle_command(&mut self, line: &str) -> Option<CommandOutcome> {
+        self.dirty = true;
         let Some((command, argument)) = commands::parse_command(line) else {
             if let Some(name) = unknown_command_name(line) {
                 self.host
@@ -413,8 +444,12 @@ impl App {
         self.host.set_theme(theme);
     }
 
-    /// One frame.
+    /// One frame. Drawing is what clears the flag: a frame is the answer to "something happened".
     pub fn draw(&mut self, area: Rect, buf: &mut Buffer) {
+        // A frame in a new area owes another one straight away: the panes learn their size by being
+        // drawn, so the frame that finds out is the frame that has to be redrawn properly.
+        self.dirty = area != self.last_area;
+        self.last_area = area;
         self.host.draw(area, buf);
     }
 }
@@ -762,6 +797,32 @@ mod tests {
     fn inside(app: &App, index: usize) -> (PaneId, u16, u16) {
         let (id, rect) = app.host().geometry()[index];
         (id, rect.x + 1, rect.y + 1)
+    }
+
+    #[test]
+    fn a_frame_is_drawn_only_when_something_happened() {
+        let (mut app, _) = app_with_three_logs();
+        let area = Rect::new(0, 0, 60, 12);
+        let mut buffer = Buffer::empty(area);
+        // The first frame in a new area owes a second one: the panes learn their size by being drawn.
+        app.draw(area, &mut buffer);
+        app.draw(area, &mut buffer);
+        assert!(!app.wants_frame(), "没事的时候不该画");
+
+        app.on_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.wants_frame(), "按键之后要画");
+        app.draw(area, &mut buffer);
+        assert!(!app.wants_frame());
+
+        app.on_agent_event(&AgentEvent::TurnFinished {
+            reason: jmds_core::event::FinishReason::Stop,
+        });
+        assert!(app.wants_frame(), "引擎说了话之后要画");
+
+        // A resize is something no pane has heard about, so the frame is owed.
+        app.draw(area, &mut buffer);
+        app.touch();
+        assert!(app.wants_frame());
     }
 
     #[test]

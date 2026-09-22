@@ -402,6 +402,12 @@ impl Pane for FileTree {
         self.recent
             .retain(|_, at| now.saturating_sub(*at) <= RECENT_TICKS);
     }
+    fn wants_frame(&self) -> bool {
+        // A recent mark fades over ticks, so while one is lit the frame it is in has to keep being
+        // drawn: otherwise it would stay lit until something else happened to redraw.
+        !self.recent.is_empty()
+    }
+
     /// The wheel moves the selection, which is how this pane scrolls: a tree whose cursor is its
     /// selection has one answer to "what happens next", and a second scrolling offset would be a
     /// second answer.
@@ -842,6 +848,24 @@ mod tests {
             "展开以后它在，而且带着标记: {drawn:?}"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_lit_mark_keeps_asking_for_frames_until_it_fades() {
+        let root = project("wants-frame");
+        let mut tree = FileTree::new(&root);
+        assert!(!tree.wants_frame(), "没变化就没有要动的东西");
+
+        tree.on_file_event(&FileEvent::Changed {
+            path: root.join("alpha.txt"),
+        });
+        assert!(tree.wants_frame(), "标记亮着的时候得继续画，否则它永远亮着");
+
+        // The mark ages out by ticks, and once it has, the pane stops asking.
+        for _ in 0..=RECENT_TICKS {
+            tree.tick();
+        }
+        assert!(!tree.wants_frame());
     }
 
     #[test]

@@ -150,6 +150,16 @@ pub trait Pane {
         Err("这个面板里没有可替换的内容".to_string())
     }
 
+    /// Whether this pane needs another frame even though nothing happened.
+    ///
+    /// A pane that animates, or that has work queued it has not shown yet, says so; everything else is
+    /// drawn when something happens. The app draws on a clock, and a pane that answered wrongly would
+    /// only be a pane updating a frame late — which is why the cheap answer is the default and the
+    /// panes that need frames say so for themselves.
+    fn wants_frame(&self) -> bool {
+        false
+    }
+
     /// Add a line from the app itself, for panes that have somewhere to put one.
     fn note(&mut self, _text: &str) {}
 
@@ -453,6 +463,11 @@ impl PaneHost {
         if let Some(pane) = self.pane_mut(id) {
             pane.on_pty_event(event);
         }
+    }
+
+    /// Whether any pane wants a frame of its own accord.
+    pub fn wants_frame(&self) -> bool {
+        self.panes.values().any(|pane| pane.wants_frame())
     }
 
     /// Everything the panes want said to the engine's processes.

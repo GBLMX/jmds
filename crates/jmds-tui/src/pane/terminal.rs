@@ -259,6 +259,12 @@ impl Pane for TerminalPane {
         self.drain_pending();
     }
 
+    fn wants_frame(&self) -> bool {
+        // Output that has arrived but has not been shown yet is this pane's own backlog: it drains a
+        // bounded amount per frame, so a flood needs the next frame to keep up.
+        !self.pending.is_empty()
+    }
+
     /// The wheel scrolls the scrollback, the way a terminal does: output keeps arriving and the view
     /// stays where the reader put it.
     fn on_scroll(&mut self, steps: isize, _height: u16) {
@@ -435,6 +441,16 @@ mod tests {
             code: None,
         });
         assert!(pane.title().ends_with("killed"), "{}", pane.title());
+    }
+
+    #[test]
+    fn queued_output_keeps_asking_for_frames() {
+        let mut pane = terminal(1, "sh");
+        assert!(!pane.wants_frame(), "没东西要显示");
+        output(&mut pane, "printed\n");
+        assert!(pane.wants_frame(), "还有没画出来的输出");
+        pane.drain_pending();
+        assert!(!pane.wants_frame());
     }
 
     #[test]

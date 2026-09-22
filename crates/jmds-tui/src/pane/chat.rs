@@ -665,6 +665,12 @@ impl Pane for Chat {
         Chat::clear(self);
     }
 
+    fn wants_frame(&self) -> bool {
+        // The working line moves while a turn runs, and a turn is the one thing here that is not over
+        // by the time the event that started it has been handled.
+        self.running
+    }
+
     /// The wheel: older lines up, the newest down. Reaching the bottom pins the view again, so
     /// there is a way back to following without hunting for it.
     fn on_scroll(&mut self, steps: isize, _height: u16) {
@@ -862,11 +868,47 @@ mod tests {
         Rect::new(0, 0, 40, 10)
     }
 
+    /// What a frame costs on a long transcript. Not run by default: it is a measurement, not a
+    /// verdict, and a wall-clock assertion in a test suite is a test that fails on a busy machine.
+    ///
+    /// `cargo test -p jmds-tui --lib -- --ignored --nocapture draw_cost`
+    #[test]
+    #[ignore]
+    fn draw_cost_of_a_long_transcript() {
+        let mut chat = Chat::new();
+        for index in 0..2000 {
+            chat.on_agent_event(&AgentEvent::Content(format!(
+                "line {index} of a transcript\n"
+            )));
+        }
+        let area = Rect::new(0, 0, 100, 40);
+        let mut buffer = Buffer::empty(area);
+        let start = std::time::Instant::now();
+        for _ in 0..200 {
+            chat.draw(area, &mut buffer, &Theme::default());
+        }
+        println!("200 draws of a 2000-line transcript: {:?}", start.elapsed());
+    }
+
     fn menu_labels(chat: &Chat) -> Vec<String> {
         chat.menu
             .as_ref()
             .map(|menu| menu.items.iter().map(|item| item.label.clone()).collect())
             .unwrap_or_default()
+    }
+
+    #[test]
+    fn a_turn_in_flight_keeps_asking_for_frames() {
+        let mut chat = Chat::new();
+        assert!(!chat.wants_frame(), "没在跑就没有要动的东西");
+        chat.on_agent_event(&AgentEvent::TurnStarted {
+            model: "deepseek-chat".into(),
+        });
+        assert!(chat.wants_frame(), "工作指示器在动");
+        chat.on_agent_event(&AgentEvent::TurnFinished {
+            reason: jmds_core::event::FinishReason::Stop,
+        });
+        assert!(!chat.wants_frame(), "回合结束就不再画了");
     }
 
     #[test]
