@@ -87,8 +87,10 @@ jobs:
         # 发布根上），且排序，所以这个文件本身可复现。
         run: |
           cd artifacts
+          # 名字不带路径（资产就摆在发布根上），且排序，所以这个文件本身可复现。`download-artifact`
+          # 把各平台的产物平铺在同一层，但这一步不该依赖那件事：有没有目录前缀都剥掉。
           find . -type f -name 'jmds-*.tar.gz' -exec sha256sum {} + \
-            | sed -E 's|^([0-9a-f]{64})  \./[^/]+/|\1  |' \
+            | sed -E 's|^([0-9a-f]{64})  \./(.*/)?|\1  |' \
             | sort -k2 \
             > SHA256SUMS
           cat SHA256SUMS
@@ -96,9 +98,12 @@ jobs:
       - name: Upload release
         uses: softprops/action-gh-release@v3
         with:
+          # Flat, because `download-artifact` puts every platform's file in one directory (its
+          # `merge-multiple` default). An earlier glob expected one directory per artifact, matched
+          # nothing, and uploaded only the checksums — a release with no binary in it.
           files: |
             artifacts/SHA256SUMS
-            artifacts/jmds-*/jmds-*
+            artifacts/jmds-*.tar.gz
           body_path: release-notes.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
