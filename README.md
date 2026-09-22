@@ -15,7 +15,8 @@ to read in an afternoon.
   as it is on disk; `bash` runs one non-interactive command with a timeout it will not silently
   shorten, and keeps long output in a file it names rather than dropping it.
 - **Sessions as append-only JSONL** under `~/.config/jmds/sessions/`, written a line at a time, with
-  recovery that stops at the first line it cannot read instead of papering over a hole.
+  recovery that stops at the first line it cannot read instead of papering over a hole. `/resume`
+  switches between the conversations held in the current directory without restarting the app.
 - **Themes** that downsample themselves to whatever the terminal can actually display, with an
   ASCII glyph set for terminals where box drawing comes out wrong.
 - **A file tree** beside the shell, rooted at the session's directory and marking what just changed,
@@ -47,6 +48,10 @@ jmds --branch [<id>]     # start a new conversation branched off one
 jmds --keep <n>          # with --branch: how many messages of its history to keep
 jmds --help
 ```
+
+The log lives under `~/.config/jmds/logs/`, beside the sessions and the prompt templates: a log in the
+working directory is a log in whatever project the app was started from, which is where it is least
+wanted.
 
 The key is read from the environment variable named in the config file, never from the file itself:
 `~/.config/jmds/config.toml`, written on first save, and read on every start. A missing key is not
@@ -81,6 +86,7 @@ Typed in the input line, starting with a slash:
 |---|---|
 | `/help` | what the keys do |
 | `/clear` | empty the transcript; the session file stays |
+| `/resume [<id>]` | continue another conversation held in this directory; alone, it lists them |
 | `/theme <name>` | switch colours: `terminal`, `default`, `dracula`, `nord`, `gruvbox`, `tokyo-night`, `catppuccin`, `one-dark` |
 | `/prompt <name>` | start the prompt file from a template in `~/.config/jmds/prompts/` |
 | `/glyphs unicode\|ascii` | which glyph set to draw with |
