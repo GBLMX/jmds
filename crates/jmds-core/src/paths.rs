@@ -28,6 +28,25 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.toml")
 }
 
+/// `~/x` — what a person, or a model, writes.
+///
+/// The shell is not on the path when the path comes from a tool call or a prompt file, so a `~`
+/// would reach the file system as a literal directory name. One function for every path that
+/// arrives from outside the program.
+pub fn expand_tilde(path: &str) -> PathBuf {
+    if path == "~" {
+        return dirs::home_dir().unwrap_or_else(|| PathBuf::from("~"));
+    }
+    match path.strip_prefix("~/") {
+        Some(rest) => dirs::home_dir()
+            .unwrap_or_else(|| PathBuf::from("~"))
+            .join(rest),
+        // `~user` is not expanded: this is one user's tool, and guessing another account's home
+        // from a name is worse than letting the path fail.
+        None => PathBuf::from(path),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -44,5 +63,18 @@ mod tests {
             );
         }
         assert_eq!(config_file(), config_dir().join("config.toml"));
+    }
+
+    #[test]
+    fn a_tilde_becomes_the_home_directory_and_other_paths_are_left_alone() {
+        assert_eq!(expand_tilde("~"), dirs::home_dir().unwrap());
+        assert_eq!(expand_tilde("~/x"), dirs::home_dir().unwrap().join("x"));
+        assert_eq!(expand_tilde("/abs/x"), PathBuf::from("/abs/x"));
+        assert_eq!(expand_tilde("rel/x"), PathBuf::from("rel/x"));
+        assert_eq!(
+            expand_tilde("~other/x"),
+            PathBuf::from("~other/x"),
+            "another user's home is not guessed"
+        );
     }
 }

@@ -16,6 +16,7 @@
 //! and the implementation drifting apart is the failure mode that matters: a parameter the model
 //! is told about but that nothing reads is worse than no parameter.
 
+pub mod queue;
+pub mod read;
 pub mod truncate;
-// `read`/`write`/`edit`/`bash` and the per-file write queue land next; this module was opened with
-// the piece they all depend on.
+// `write`, `edit` and `bash` land next; they build on the three here.
