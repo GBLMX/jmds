@@ -49,6 +49,12 @@ pub const COMMANDS: &[Command] = &[
         takes_argument: true,
     },
     Command {
+        name: "prompt",
+        usage: "/prompt <name>",
+        description: "start the prompt file from a saved template",
+        takes_argument: true,
+    },
+    Command {
         name: "glyphs",
         usage: "/glyphs unicode|ascii",
         description: "which glyph set to draw with",
@@ -166,15 +172,21 @@ impl Source for SessionSource {
     /// the glyph sets are the renderer's. Both are offered the same way, so `/theme dr` and
     /// `/glyphs un` are completed by the same mechanism that completes `/th`.
     fn argument(&self, command: &str, query: &str) -> Vec<Item> {
-        let values: &[&str] = match command {
-            "theme" => Theme::NAMES,
-            "glyphs" => &["unicode", "ascii"],
+        let values: Vec<String> = match command {
+            "theme" => Theme::NAMES.iter().map(|name| name.to_string()).collect(),
+            "glyphs" => ["unicode", "ascii"]
+                .iter()
+                .map(|set| set.to_string())
+                .collect(),
+            // The templates are whatever the user has saved, so they are read rather than listed: one
+            // they wrote a minute ago belongs in the menu a minute later.
+            "prompt" => jmds_core::prompt::templates(),
             _ => return Vec::new(),
         };
         values
-            .iter()
+            .into_iter()
             .filter(|value| value.starts_with(query))
-            .map(|value| Item::new(*value))
+            .map(Item::new)
             .collect()
     }
 
@@ -317,6 +329,22 @@ mod tests {
         // A command with nothing to choose from says nothing rather than guessing.
         assert!(source.argument("clear", "").is_empty());
         assert!(source.argument("nope", "").is_empty());
+        // Every command that takes an argument says what for, and the ones that do not say nothing.
+        assert!(Command::find("prompt").is_some_and(|command| command.takes_argument));
+    }
+
+    #[test]
+    fn the_prompt_command_offers_the_templates_that_are_saved() {
+        let source = SessionSource::new(scratch("prompt-values"));
+        let saved = jmds_core::prompt::templates();
+        let offered: Vec<String> = source
+            .argument("prompt", "")
+            .into_iter()
+            .map(|item| item.label)
+            .collect();
+        assert_eq!(offered, saved, "菜单里就是用户存下的那些模板");
+        // And a name that no template starts with is filtered out like any other query.
+        assert!(source.argument("prompt", "zzz").is_empty());
     }
 
     #[test]

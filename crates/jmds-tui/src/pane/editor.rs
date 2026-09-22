@@ -83,6 +83,26 @@ impl Editor {
         Ok(editor)
     }
 
+    /// Replace the buffer with `text`, writing it to this pane's file.
+    ///
+    /// Refused when the buffer differs from the file: picking a template is not a reason to discard
+    /// what someone is in the middle of writing, and saying so is better than either overwriting it
+    /// or silently doing nothing.
+    pub fn load(&mut self, text: &str) -> Result<(), String> {
+        if self.is_dirty() {
+            return Err("这里还有没保存的改动".to_string());
+        }
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        std::fs::write(&self.path, text).map_err(|error| error.to_string())?;
+        self.state = EditorState::new(Lines::from(text));
+        self.saved = text.to_string();
+        self.notice = Some("loaded".to_string());
+        self.title_cache = self.compose_title();
+        Ok(())
+    }
+
     pub fn path(&self) -> &PathBuf {
         &self.path
     }
@@ -183,6 +203,10 @@ impl Pane for Editor {
         &self.title_cache
     }
 
+    fn load_prompt(&mut self, text: &str) -> Result<(), String> {
+        self.load(text)
+    }
+
     fn draw(&mut self, area: Rect, buf: &mut Buffer, theme: &Theme) {
         let styles = theme.styles();
         // The cursor is drawn by the widget through its theme rather than by the terminal, so there
@@ -272,6 +296,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn loading_a_template_replaces_the_file_and_the_buffer() {
+        let dir = scratch("load");
+        let path = dir.join("prompt.md");
+        std::fs::write(&path, "old").unwrap();
+        let mut editor = Editor::open(&path, &dir).unwrap();
+        assert_eq!(editor.text(), "old");
+
+        editor.load("---\ninstruction: 换个活\n---\n").unwrap();
+        assert_eq!(editor.text(), "---\ninstruction: 换个活\n---\n");
+        assert!(!editor.is_dirty(), "载入之后缓冲和文件是一致的");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), editor.text());
+        assert_eq!(editor.notice(), Some("loaded"));
+    }
+
+    #[test]
+    fn loading_over_unsaved_work_is_refused_rather_than_done() {
+        let dir = scratch("load-dirty");
+        let path = dir.join("prompt.md");
+        std::fs::write(&path, "old").unwrap();
+        let mut editor = Editor::open(&path, &dir).unwrap();
+        editor.state.lines = Lines::from("写了半句");
+        assert!(editor.is_dirty());
+
+        let refused = editor.load("模板").expect_err("有没保存的东西就该拒绝");
+        assert!(refused.contains("没保存"), "{refused}");
+        assert_eq!(editor.text(), "写了半句", "缓冲区原样不动");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "old", "文件也不动");
     }
 
     fn key(code: KeyCode) -> KeyEvent {

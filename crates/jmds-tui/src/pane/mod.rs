@@ -142,6 +142,14 @@ pub trait Pane {
     /// second mouth, and a terminal app is used by people whose hands are on the keyboard.
     fn on_scroll(&mut self, _steps: isize, _height: u16) {}
 
+    /// Put `text` into this pane, for panes that hold a file's contents.
+    ///
+    /// Refused rather than forced when there is unsaved work: a pane that overwrote what someone was
+    /// writing would be a pane that loses their work to a command they only meant to try.
+    fn load_prompt(&mut self, _text: &str) -> Result<(), String> {
+        Err("这个面板里没有可替换的内容".to_string())
+    }
+
     /// Add a line from the app itself, for panes that have somewhere to put one.
     fn note(&mut self, _text: &str) {}
 

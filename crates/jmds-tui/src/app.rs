@@ -296,13 +296,45 @@ impl App {
 
     /// The pane a command's output belongs beside: the one the shell is showing in.
     fn shell_pane(&self) -> Option<jmds_core::pane::PaneId> {
-        use jmds_core::pane::PaneKind;
+        self.pane_of(jmds_core::pane::PaneKind::Terminal)
+    }
 
+    /// The first pane of a kind, in the order they are laid out.
+    fn pane_of(&self, kind: jmds_core::pane::PaneKind) -> Option<jmds_core::pane::PaneId> {
         self.host
             .tree()
             .leaves()
             .into_iter()
-            .find(|id| self.host.pane(*id).map(|pane| pane.kind()) == Some(PaneKind::Terminal))
+            .find(|id| self.host.pane(*id).map(|pane| pane.kind()) == Some(kind))
+    }
+
+    /// Start the prompt file from a saved template.
+    ///
+    /// The template is written *into* the file the editor is holding rather than opened as a buffer of
+    /// its own: what goes out with a turn is that file, and a template that lived somewhere else would
+    /// be a second place the prompt can be. A pane with unsaved work refuses, and says so.
+    fn load_prompt(&mut self, name: &str) {
+        if name.is_empty() {
+            self.host.note("usage: /prompt <name>");
+            return;
+        }
+        let path = jmds_core::prompt::prompts_dir().join(format!("{name}.md"));
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(_) => {
+                self.host.note(&format!("没有这个模板：{name}"));
+                return;
+            }
+        };
+        let Some(id) = self.pane_of(jmds_core::pane::PaneKind::Editor) else {
+            self.host.note("没有打开的编辑器面板");
+            return;
+        };
+        match self.host.pane_mut(id).map(|pane| pane.load_prompt(&text)) {
+            Some(Ok(())) => self.host.note(&format!("已从模板 {name} 起头")),
+            Some(Err(why)) => self.host.note(&format!("没有替换：{why}")),
+            None => {}
+        }
     }
 
     /// What the panes want said to the engine's processes.
@@ -340,6 +372,7 @@ impl App {
             "help" => self.host.note(HELP),
             "clear" => self.host.clear(),
             "theme" => self.set_theme(argument),
+            "prompt" => self.load_prompt(argument),
             "glyphs" => self.set_glyphs(argument),
             _ => {}
         }

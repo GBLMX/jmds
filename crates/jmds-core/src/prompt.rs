@@ -166,6 +166,35 @@ pub fn prompts_dir() -> PathBuf {
     crate::paths::config_dir().join("prompts")
 }
 
+/// The templates in `dir`, by name: `<name>.md` is the template `name`.
+///
+/// A directory that is not there yet is a user who has never saved one, not an error; and a name that
+/// does not end in `.md` is not a template, because everything in here is prompt text by definition.
+pub fn templates_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            // A file and not a directory that happens to be called `x.md`: what is offered in a menu
+            // has to be something that can be read.
+            (path.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("md"))
+            .then(|| path.file_stem()?.to_str().map(str::to_string))
+            .flatten()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// The templates the user has saved.
+pub fn templates() -> Vec<String> {
+    templates_in(&prompts_dir())
+}
+
 /// The file the app opens when nothing else is asked for.
 pub fn default_prompt_path() -> PathBuf {
     prompts_dir().join("prompt.md")
@@ -173,6 +202,32 @@ pub fn default_prompt_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("jmds-prompt-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn templates_are_the_markdown_files_by_name() {
+        let dir = scratch("templates");
+        std::fs::write(dir.join("review.md"), "---\n---\n").unwrap();
+        std::fs::write(dir.join("fix.md"), "---\n---\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "not a template").unwrap();
+        std::fs::create_dir_all(dir.join("nested.md")).unwrap();
+
+        assert_eq!(templates_in(&dir), ["fix", "review"], "按名字排，只有 .md");
+    }
+
+    #[test]
+    fn a_prompts_directory_that_is_not_there_has_no_templates() {
+        // Never saved one, or never run the app: an empty menu, not an error.
+        assert!(templates_in(&scratch("missing").join("nowhere")).is_empty());
+    }
+
     use super::*;
 
     #[test]
