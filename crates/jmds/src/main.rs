@@ -140,6 +140,17 @@ async fn session_loop(
     let mut events = bus.subscribe();
     let mut ticker = tokio::time::interval(TICK);
 
+    // Watching the project, so whoever shows files hears about changes instead of polling a
+    // directory every frame. Alive for the length of the session: dropping it stops the watch. A
+    // watch that cannot start is worth a warning, not the end of the app — everything else works.
+    let _watcher = match jmds_core::watch::Watcher::watch(&cwd, bus.clone()) {
+        Ok(watcher) => Some(watcher),
+        Err(error) => {
+            log::warn!("文件监视起不来，文件面板不会自动更新：{error}");
+            None
+        }
+    };
+
     loop {
         // One frame, written as one update: without this a redraw is visible while it is being
         // written, which is exactly what makes an 80 ms animation flicker.
@@ -186,6 +197,9 @@ async fn session_loop(
             incoming = events.recv() => match incoming {
                 Ok(BusEvent::Agent(agent)) => {
                     app.on_agent_event(&agent);
+                }
+                Ok(BusEvent::File(file)) => {
+                    app.on_file_event(&file);
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
@@ -266,7 +280,7 @@ fn spawn_conversation(
 
         let agent = Agent::new(
             client,
-            ToolSet::new(&cwd),
+            ToolSet::new(&cwd).with_bus(bus.clone()),
             bus.clone(),
             AgentConfig::new(model.clone(), system),
         );

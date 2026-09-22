@@ -143,6 +143,11 @@ impl App {
         Action::Continue
     }
 
+    /// Tell the panes that a file under the project root changed.
+    pub fn on_file_event(&mut self, event: &jmds_core::event::FileEvent) {
+        self.host.on_file_event(event);
+    }
+
     /// A frame passed. The loop that owns the clock calls this, which is what animates a pane with
     /// something to show while a turn runs.
     pub fn tick(&mut self) {

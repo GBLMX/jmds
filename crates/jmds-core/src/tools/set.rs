@@ -22,6 +22,7 @@ use jmds_api::ToolSpec;
 use serde::de::DeserializeOwned;
 
 use super::{bash, edit, queue::FileMutex, read, write};
+use crate::event::{EventBus, FileEvent};
 
 /// The tools, in the order the model is told about them.
 pub const ORDER: [&str; 4] = ["read", "write", "edit", "bash"];
@@ -64,6 +65,11 @@ pub struct ToolSet {
     cwd: PathBuf,
     /// One writer per file, so two calls that touch the same path cannot interleave.
     files: FileMutex,
+    /// Where to announce that a write is about to happen, when anyone is listening.
+    ///
+    /// Optional because it genuinely is: a tool set driven straight from a test has no bus, and a
+    /// write nobody watches is exactly what such a test wants. See [`Self::announce_write`].
+    bus: Option<EventBus>,
 }
 
 /// What one tool call produced.
@@ -100,6 +106,27 @@ impl ToolSet {
         Self {
             cwd: cwd.into(),
             files: FileMutex::new(),
+            bus: None,
+        }
+    }
+
+    /// Announce this tool set's writes on `bus`.
+    ///
+    /// The watcher listens for [`FileEvent::EditorWrote`] and stays quiet about the notification
+    /// that follows one: without this, every file the model writes comes back as a change from
+    /// outside, and a pane that reloads on change reloads what the tool just wrote.
+    pub fn with_bus(mut self, bus: EventBus) -> Self {
+        self.bus = Some(bus);
+        self
+    }
+
+    /// Say that a write is about to happen. Called *before* the write, which is the whole contract:
+    /// the announcement has to be on the bus by the time the filesystem notification comes back.
+    fn announce_write(&self, path: impl AsRef<Path>) {
+        if let Some(bus) = &self.bus {
+            bus.publish(FileEvent::EditorWrote {
+                path: path.as_ref().to_path_buf(),
+            });
         }
     }
 
@@ -212,6 +239,7 @@ impl ToolSet {
             path: self.resolve(&args.path),
             ..args
         };
+        self.announce_write(&args.path);
         match write::write(&args, &self.files).await {
             Ok(out) => {
                 let verb = if out.created { "created" } else { "replaced" };
@@ -231,6 +259,7 @@ impl ToolSet {
             path: self.resolve(&args.path),
             ..args
         };
+        self.announce_write(&args.path);
         match edit::edit(&args, &self.files).await {
             Ok(out) => {
                 let plural = if out.replaced == 1 { "" } else { "s" };
@@ -482,5 +511,45 @@ mod tests {
         let outcome = set.call("read", r#"{"path":"nope.txt"}"#).await;
         assert!(!outcome.ok);
         assert!(!outcome.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_write_announces_itself_so_the_watcher_can_stay_quiet() {
+        let dir = scratch("announce");
+        let bus = crate::event::EventBus::new(16);
+        let mut events = bus.subscribe();
+        let set = ToolSet::new(&dir).with_bus(bus);
+
+        let target = dir.join("a.txt");
+        let outcome = set
+            .call(
+                "write",
+                &format!(
+                    r#"{{"path":"{}","content":"hi"}}"#,
+                    target.to_string_lossy()
+                ),
+            )
+            .await;
+        assert!(outcome.ok, "{}", outcome.content);
+
+        // The announcement names the file, and it is on the bus: that is what lets the watcher
+        // recognise the notification for this write and not report it back as somebody's change.
+        match events.try_recv() {
+            Ok(crate::event::Event::File(FileEvent::EditorWrote { path })) => {
+                assert_eq!(path, target);
+            }
+            other => panic!("预期的公告，实际 {other:?}"),
+        }
+
+        // A read touches nothing, so it announces nothing: a read that did would cancel a real
+        // change's notification and a pane would quietly miss it.
+        let read = set
+            .call(
+                "read",
+                &format!(r#"{{"path":"{}"}}"#, target.to_string_lossy()),
+            )
+            .await;
+        assert!(read.ok, "{}", read.content);
+        assert!(events.try_recv().is_err(), "读文件不写盘，不该有公告");
     }
 }

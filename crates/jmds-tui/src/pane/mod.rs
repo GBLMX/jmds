@@ -110,6 +110,13 @@ pub trait Pane {
         Vec::new()
     }
 
+    /// Something happened to a file under the project root.
+    ///
+    /// A pane that shows files wants this; a pane that shows a conversation does not, and the
+    /// default ignores it. It is told rather than asking, because asking means walking the tree on
+    /// every frame, and the whole point of a watcher is that nobody has to.
+    fn on_file_event(&mut self, _event: &jmds_core::event::FileEvent) {}
+
     /// Add a line from the app itself, for panes that have somewhere to put one.
     fn note(&mut self, _text: &str) {}
 
@@ -357,6 +364,13 @@ impl PaneHost {
     pub fn focused_mut(&mut self) -> Option<&mut (dyn Pane + 'static)> {
         let id = self.focused_id()?;
         self.pane_mut(id)
+    }
+
+    /// Tell every pane what happened to a file.
+    pub fn on_file_event(&mut self, event: &jmds_core::event::FileEvent) {
+        for pane in self.panes.values_mut() {
+            pane.on_file_event(event);
+        }
     }
 
     /// Say something as the app, to whichever pane is focused.
