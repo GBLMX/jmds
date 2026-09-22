@@ -16,7 +16,9 @@
 //! and the implementation drifting apart is the failure mode that matters: a parameter the model
 //! is told about but that nothing reads is worse than no parameter.
 
+pub mod edit;
 pub mod queue;
 pub mod read;
 pub mod truncate;
-// `write`, `edit` and `bash` land next; they build on the three here.
+pub mod write;
+// `bash` lands next; it bounds its output with `truncate` the same way `read` does.

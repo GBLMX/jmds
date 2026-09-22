@@ -65,9 +65,16 @@ pub struct ClientConfig {
     pub base_url: String,
     pub model: String,
     pub api_key: String,
+    /// The most tokens one answer may have. **Always sent**: the API documents it and treats its
+    /// absence as an error, which is why it is a field rather than something the request leaves out.
+    pub max_tokens: u64,
 }
 
 impl ClientConfig {
+    /// What the public API takes for a chat completion. The reasoning model accepts far more; call
+    /// [`Self::with_max_tokens`] when a model needs more room than this.
+    pub const DEFAULT_MAX_TOKENS: u64 = 8192;
+
     pub fn new(
         base_url: impl Into<String>,
         model: impl Into<String>,
@@ -77,7 +84,13 @@ impl ClientConfig {
             base_url: base_url.into(),
             model: model.into(),
             api_key: api_key.into(),
+            max_tokens: Self::DEFAULT_MAX_TOKENS,
         }
+    }
+
+    pub fn with_max_tokens(mut self, max_tokens: u64) -> Self {
+        self.max_tokens = max_tokens;
+        self
     }
 }
 
@@ -180,6 +193,9 @@ impl Client {
         let mut body = serde_json::json!({
             "model": self.config.model,
             "messages": messages,
+            // Sent every time: the API wants an explicit ceiling, and a request that leaves it out
+            // is one the provider is free to reject.
+            "max_tokens": self.config.max_tokens,
             "stream": true,
             "stream_options": { "include_usage": true },
         });
@@ -318,6 +334,14 @@ mod tests {
         assert_eq!(
             body["stream_options"]["include_usage"], true,
             "without this the stream ends without any accounting"
+        );
+        assert_eq!(
+            body["max_tokens"], 8192,
+            "the ceiling is always sent: {body}"
+        );
+        assert!(
+            body.get("tool_choice").is_none(),
+            "this API takes no tool_choice: {body}"
         );
         assert_eq!(body["messages"][0]["role"], "user");
         assert!(

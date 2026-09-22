@@ -166,30 +166,36 @@ pub async fn read(args: &ReadArgs) -> Result<ReadOutput, ReadError> {
         })
 }
 
-fn read_blocking(path: PathBuf, offset: usize, max_lines: usize) -> Result<ReadOutput, ReadError> {
-    let metadata = std::fs::metadata(&path).map_err(|error| match error.kind() {
-        std::io::ErrorKind::NotFound => ReadError::NotFound(path.clone()),
+/// A file's whole text, with none of the limits of [`read`].
+///
+/// What a tool that rewrites a file needs: `read` shows the model a view, this is the thing itself.
+/// It is the same three failures, reported the same way, so a caller does not have to decide which
+/// of two read functions to call.
+pub(crate) fn read_whole(path: &std::path::Path) -> Result<String, ReadError> {
+    let metadata = std::fs::metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => ReadError::NotFound(path.to_path_buf()),
         _ => ReadError::Io {
-            path: path.clone(),
+            path: path.to_path_buf(),
             error: error.to_string(),
         },
     })?;
     if metadata.is_dir() {
-        return Err(ReadError::NotAFile(path));
+        return Err(ReadError::NotAFile(path.to_path_buf()));
     }
-
-    let bytes = std::fs::read(&path).map_err(|error| ReadError::Io {
-        path: path.clone(),
+    let bytes = std::fs::read(path).map_err(|error| ReadError::Io {
+        path: path.to_path_buf(),
         error: error.to_string(),
     })?;
-    let text = String::from_utf8(bytes).map_err(|_| ReadError::NotUtf8(path.clone()))?;
+    String::from_utf8(bytes).map_err(|_| ReadError::NotUtf8(path.to_path_buf()))
+}
 
+fn read_blocking(path: PathBuf, offset: usize, max_lines: usize) -> Result<ReadOutput, ReadError> {
+    let bytes = std::fs::metadata(&path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0) as usize;
+    let text = read_whole(&path)?;
     let shown = truncate::head(&text, offset, max_lines, MAX_BYTES);
-    Ok(ReadOutput {
-        path,
-        shown,
-        bytes: metadata.len() as usize,
-    })
+    Ok(ReadOutput { path, shown, bytes })
 }
 
 #[cfg(test)]

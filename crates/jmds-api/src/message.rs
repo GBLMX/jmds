@@ -13,11 +13,12 @@
 
 use serde::{Deserialize, Serialize};
 
-/// What goes in place of reasoning that was never recorded.
+/// What is replayed when a turn's reasoning was never recorded.
 ///
-/// A constant rather than an empty string: the API rejects an empty `reasoning_content`, and a
-/// reader of a session file can tell "this was never recorded" from "the model thought nothing".
-pub const REASONING_REPLAY_PLACEHOLDER: &str = "(reasoning not recorded)";
+/// An **empty string**, which is what DeepSeek accepts. Not a human-readable placeholder: the
+/// reasoning is part of the cached prefix, so anything invented here changes the bytes of every
+/// replayed turn, and inventing text the model never produced is not this tool's decision to make.
+pub const REASONING_REPLAY_UNKNOWN: &str = "";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -158,24 +159,74 @@ pub fn requires_reasoning_replay(model: &str) -> bool {
     model.trim().to_ascii_lowercase().starts_with("deepseek")
 }
 
-/// Give every tool-calling assistant turn a `reasoning_content`, in place.
+/// Give every assistant turn a `reasoning_content`, in place.
 ///
-/// Returns how many turns were patched — zero for a model that does not require it, and zero for a
-/// conversation that already carries its reasoning. Patching is deliberately the narrow fix:
-/// nothing is reordered, nothing is dropped, so the prefix of the conversation is untouched and the
-/// prefix cache survives.
+/// *Every* turn, not only the ones that asked for tools: DeepSeek's contract is that the reasoning
+/// is part of the conversation being replayed, and dropping it is not a legal way to save tokens —
+/// the turn that is missing it is the turn whose prefix stops matching.
+///
+/// Returns how many turns were patched: zero for a model that does not require it, and zero for a
+/// conversation that already carries its reasoning. Patching changes nothing else — nothing is
+/// reordered, nothing is dropped — so what the provider cached stays a prefix.
 pub fn enforce_reasoning_replay(messages: &mut [ChatMessage], model: &str) -> usize {
     if !requires_reasoning_replay(model) {
         return 0;
     }
     let mut patched = 0;
     for message in messages {
-        if message.asks_for_tools() && !message.has_reasoning() {
-            message.reasoning_content = Some(REASONING_REPLAY_PLACEHOLDER.into());
+        if message.role == Role::Assistant && !message.has_reasoning() {
+            message.reasoning_content = Some(REASONING_REPLAY_UNKNOWN.into());
             patched += 1;
         }
     }
     patched
+}
+
+/// Remove special template tokens that leaked into visible text.
+///
+/// The model's own control tokens (`<｜end▁of▁thinking｜>` and friends) belong to the template, not
+/// to the answer, and they show up in streamed content often enough that every harness that talks
+/// to this API has a stripper. Anything shaped like `<｜…｜>` goes: the alternative is a transcript
+/// with template debris in it, and a *different* byte sequence than the one the model produced when
+/// the turn is replayed.
+pub fn strip_special_tokens(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('<') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start..];
+        // `｜` (U+FF5C) is what the template uses on both sides of a token's name.
+        match after.find('｜') {
+            Some(open)
+                if after[..open]
+                    .chars()
+                    .all(|c| matches!(c, '<' | '｜' | '▁' | '|')) =>
+            {
+                match after[open + '｜'.len_utf8()..].find('｜') {
+                    Some(close) => {
+                        let end = open + '｜'.len_utf8() + close + '｜'.len_utf8();
+                        let tail = &after[end..];
+                        if let Some(gt) = tail.find('>') {
+                            rest = &tail[gt + 1..];
+                            continue;
+                        }
+                        out.push_str(after);
+                        rest = "";
+                    }
+                    None => {
+                        out.push_str(after);
+                        rest = "";
+                    }
+                }
+            }
+            _ => {
+                out.push('<');
+                rest = &after['<'.len_utf8()..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 #[cfg(test)]
@@ -217,22 +268,46 @@ mod tests {
     }
 
     #[test]
-    fn reasoning_is_replayed_only_where_it_is_owed() {
+    fn every_assistant_turn_owes_its_reasoning() {
+        // Not only the turns that called a tool: DeepSeek's contract is about the conversation
+        // being replayed, and a plain answer whose reasoning was dropped is exactly the turn that
+        // stops matching the cached prefix.
         let mut messages = vec![
             ChatMessage::user("do it"),
             ChatMessage::assistant_with_tools("", vec![ToolCall::new("c1", "read", "{}")]),
             ChatMessage::tool("c1", "ok"),
             ChatMessage::assistant("done"),
         ];
-        assert_eq!(enforce_reasoning_replay(&mut messages, "deepseek-chat"), 1);
+        assert_eq!(enforce_reasoning_replay(&mut messages, "deepseek-chat"), 2);
 
+        for turn in [&messages[1], &messages[3]] {
+            assert_eq!(
+                turn.reasoning_content.as_deref(),
+                Some(REASONING_REPLAY_UNKNOWN)
+            );
+        }
+        // What is replayed when nothing was recorded is nothing — not a sentence this app made up.
         assert_eq!(
-            messages[1].reasoning_content.as_deref(),
-            Some(REASONING_REPLAY_PLACEHOLDER)
+            REASONING_REPLAY_UNKNOWN, "",
+            "an invented placeholder would change the prefix"
         );
-        // A plain answer owes nothing: there is no tool call it has to be consistent with.
-        assert!(messages[3].reasoning_content.is_none());
+        // Nobody else's turn carries a reasoning field.
         assert!(messages[0].reasoning_content.is_none());
+        assert!(messages[2].reasoning_content.is_none());
+    }
+
+    #[test]
+    fn special_template_tokens_are_stripped_from_visible_text() {
+        assert_eq!(
+            strip_special_tokens("answer<｜end▁of▁thinking｜>"),
+            "answer",
+            "a control token is not part of the answer"
+        );
+        assert_eq!(strip_special_tokens("a<｜begin▁of▁sentence｜>b"), "ab");
+        // Text that merely uses angle brackets is left alone.
+        assert_eq!(strip_special_tokens("a < b > c"), "a < b > c");
+        assert_eq!(strip_special_tokens("Vec<String>"), "Vec<String>");
+        assert_eq!(strip_special_tokens("<｜unterminated"), "<｜unterminated");
     }
 
     #[test]
@@ -261,7 +336,7 @@ mod tests {
         assert_eq!(enforce_reasoning_replay(&mut messages, "deepseek-chat"), 1);
         assert_eq!(
             messages[0].reasoning_content.as_deref(),
-            Some(REASONING_REPLAY_PLACEHOLDER)
+            Some(REASONING_REPLAY_UNKNOWN)
         );
     }
 
