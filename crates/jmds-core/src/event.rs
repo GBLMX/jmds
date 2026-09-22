@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use tokio::sync::broadcast;
 
-use crate::pane::{PaneId, PaneSize, PaneSpec};
+use crate::pane::{PaneId, PaneSpec};
 
 /// What the model is doing. Deltas are deltas: a subscriber appends, it does not replace.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,7 +82,7 @@ pub enum FileEvent {
     EditorWrote { path: PathBuf },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum PaneEvent {
     Opened {
         spec: PaneSpec,
@@ -93,9 +93,10 @@ pub enum PaneEvent {
     Focused {
         id: PaneId,
     },
-    Resized {
+    /// 持有该 pane 的那次分割移动了 —— 比例而不是尺寸（几何在 Pane 树里）。
+    Ratio {
         id: PaneId,
-        size: PaneSize,
+        ratio: f32,
     },
     /// A pane renamed itself after it learnt what it is showing — a terminal that ran `cargo
     /// test`, a chat pane that switched model.
