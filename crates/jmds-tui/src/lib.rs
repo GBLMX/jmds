@@ -10,5 +10,6 @@
 //! out, draws their borders and routes keys to whichever one has focus. Both reach the engine
 //! through `jmds-core`'s event bus.
 
+pub mod app;
 pub mod pane;
 pub mod terminal;
