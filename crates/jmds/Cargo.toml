@@ -1,6 +1,6 @@
 [package]
 name = "jmds"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Just My DeepSeek: the binary — a terminal app wrapping the engine"
 license = "MIT"
