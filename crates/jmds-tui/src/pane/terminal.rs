@@ -43,6 +43,14 @@ use crate::theme::Theme;
 /// without holding a whole log in a second place — the artifact files are for that.
 const SCROLLBACK: usize = 2_000;
 
+/// How much one `pump` takes.
+///
+/// A program that floods the PTY — `yes`, a build with no rate limit, a runaway loop — must not be
+/// able to make a frame wait for it. An unbounded drain would never see the channel empty and would
+/// never return, so the app would stop drawing while the flood went on; the next frame takes the
+/// rest. The pty's own buffer is what pushes back in the meantime, which is exactly what it is for.
+const PUMP_CHUNKS: usize = 64;
+
 /// A shell in a pane.
 pub struct TerminalPane {
     /// The program's name, as it was launched.
@@ -157,7 +165,7 @@ impl TerminalPane {
     /// Take everything the program has said since the last call.
     pub fn pump(&mut self) -> usize {
         let mut taken = 0;
-        loop {
+        for _ in 0..PUMP_CHUNKS {
             match self.incoming.try_recv() {
                 Ok(chunk) => {
                     self.parser.process(&chunk);
@@ -498,6 +506,29 @@ mod tests {
         assert!(wait_for(&mut pane, |pane| pane.contents().contains("abc")));
         let position = pane.cursor(area()).expect("a visible cursor");
         assert_eq!(position, Position::new(3, 0), "after three characters");
+    }
+
+    #[test]
+    fn a_flooding_program_does_not_stall_a_pump() {
+        // A program that never stops writing must not make a frame wait for it: one pump takes a
+        // bounded amount and returns, or the app stops drawing while the flood goes on.
+        let dir = std::env::temp_dir().join(format!("jmds-pty-flood-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let mut pane = TerminalPane::spawn("sh", &[], &dir, (24, 80)).expect("a pty opens");
+
+        // Typed straight into the shell rather than through any command machinery: this is about
+        // the pane's reading, not about what a command is.
+        pane.write(b"while :; do printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\n'; done\r")
+            .unwrap();
+        let started = Instant::now();
+        for _ in 0..5 {
+            pane.pump();
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "five pumps took {:?}, so one of them waited for the program",
+            started.elapsed()
+        );
     }
 
     #[test]
